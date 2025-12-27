@@ -1,10 +1,11 @@
 import React, { useRef, useEffect } from 'react';
-import { Plus, Download, X, Check, Archive, UploadCloud } from 'lucide-react';
-import { TransferProgress } from '../types';
+import { Plus, Download, X, Check, Archive, UploadCloud, Wifi, WifiOff } from 'lucide-react';
+import { TransferProgress, ConnectionState } from '../types';
 import JSZip from 'jszip';
 
 interface Props {
   role: 'sender' | 'receiver' | null;
+  connectionState: ConnectionState;
   progress: TransferProgress | null;
   onSendFiles: (files: File[]) => void;
   onDisconnect: () => void;
@@ -13,6 +14,7 @@ interface Props {
 
 export const TransferPanel: React.FC<Props> = ({ 
   role,
+  connectionState,
   progress, 
   onSendFiles, 
   onDisconnect,
@@ -69,20 +71,39 @@ export const TransferPanel: React.FC<Props> = ({
 
   // --- Render Helpers ---
 
-  const renderHeader = () => (
-    <div className="w-full flex justify-between items-center mb-6 shrink-0">
-      <h3 className="text-xl font-semibold text-white">
-        {role === 'sender' ? 'Sending to Device' : 'Receiving Files'}
-      </h3>
-      <button 
-          onClick={onDisconnect}
-          aria-label="Disconnect and close"
-          className="w-10 h-10 flex items-center justify-center bg-[#1c1c1e] rounded-full text-[#a3a3a3] hover:text-white hover:bg-[#2c2c2e] transition-colors"
-      >
-          <X className="w-5 h-5" aria-hidden="true" />
-      </button>
-    </div>
-  );
+  const renderHeader = () => {
+    const isConnected = connectionState === 'connected';
+    
+    return (
+      <div className="w-full flex justify-between items-start mb-6 shrink-0">
+        <div className="flex flex-col gap-1.5">
+          <h3 className="text-xl font-semibold text-white">
+            {role === 'sender' ? 'Sender Mode' : 'Receiver Mode'}
+          </h3>
+          
+          {/* Live Connection Status Badge */}
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border w-fit transition-colors duration-300 ${isConnected ? 'bg-green-500/10 border-green-500/20' : 'bg-red-500/10 border-red-500/20'}`}>
+             {isConnected ? (
+                <Wifi className="w-3.5 h-3.5 text-green-400" />
+             ) : (
+                <WifiOff className="w-3.5 h-3.5 text-red-400" />
+             )}
+             <span className={`text-xs font-medium tracking-wide ${isConnected ? 'text-green-400' : 'text-red-400'}`}>
+                {isConnected ? 'Connected' : 'Disconnected'}
+             </span>
+          </div>
+        </div>
+
+        <button 
+            onClick={onDisconnect}
+            aria-label="Disconnect and close"
+            className="w-10 h-10 flex items-center justify-center bg-[#1c1c1e] rounded-full text-[#a3a3a3] hover:text-white hover:bg-[#2c2c2e] transition-colors"
+        >
+            <X className="w-5 h-5" aria-hidden="true" />
+        </button>
+      </div>
+    );
+  };
 
   const renderProgressBar = () => {
     if (!progress) return null;
@@ -115,9 +136,10 @@ export const TransferPanel: React.FC<Props> = ({
   const renderSenderUI = () => (
     <div className={`flex-1 flex flex-col items-center justify-center w-full min-h-0 transition-opacity duration-300 ${progress ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
         <button 
-          onClick={() => fileInputRef.current?.click()}
+          onClick={() => connectionState === 'connected' && fileInputRef.current?.click()}
+          disabled={connectionState !== 'connected'}
           aria-label="Select files to send"
-          className="w-full max-w-[280px] aspect-square bg-[#1c1c1e] hover:bg-[#2c2c2e] border border-white/5 rounded-[3rem] flex flex-col items-center justify-center gap-6 transition-all duration-300 group active:scale-[0.97] shadow-2xl shadow-black/50"
+          className="w-full max-w-[280px] aspect-square bg-[#1c1c1e] hover:bg-[#2c2c2e] disabled:opacity-50 disabled:cursor-not-allowed border border-white/5 rounded-[3rem] flex flex-col items-center justify-center gap-6 transition-all duration-300 group active:scale-[0.97] shadow-2xl shadow-black/50"
         >
           <input 
             type="file" 
@@ -130,9 +152,13 @@ export const TransferPanel: React.FC<Props> = ({
           <div className="w-20 h-20 rounded-full bg-black flex items-center justify-center group-hover:scale-110 transition-transform duration-300 border border-white/5">
               <Plus className="w-8 h-8 text-white" aria-hidden="true" />
           </div>
-          <span className="text-neutral-400 text-lg font-medium group-hover:text-white transition-colors">Send Files</span>
+          <span className="text-neutral-400 text-lg font-medium group-hover:text-white transition-colors">
+            {connectionState === 'connected' ? 'Send Files' : 'Wait...'}
+          </span>
         </button>
-        <p className="mt-8 text-neutral-600 text-sm">Select files to beam to receiver</p>
+        <p className="mt-8 text-neutral-600 text-sm">
+           {connectionState === 'connected' ? 'Select files to beam to receiver' : 'Waiting for connection...'}
+        </p>
     </div>
   );
 

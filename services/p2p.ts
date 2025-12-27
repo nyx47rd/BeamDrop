@@ -1,5 +1,6 @@
 import { signalingService } from './mqttSignaling';
 import { ConnectionState, FileMetadata, TransferProgress } from '../types';
+import { deviceService } from './device';
 
 const CHUNK_SIZE = 16 * 1024; // 16KB chunks
 const MAX_BUFFERED_AMOUNT = 64 * 1024; // 64KB buffer limit
@@ -119,6 +120,8 @@ export class P2PManager {
         this.log("Secure connection established!");
         this.updateState('connected');
         this.stopAnnouncing();
+        // Notify user if app is in background
+        deviceService.sendNotification('BeamDrop Connected', 'Ready to transfer files');
       } else if (state === 'failed') {
         this.log("Connection attempt failed. Retrying...");
         this.updateState('failed');
@@ -159,6 +162,8 @@ export class P2PManager {
             this.receivedBuffers = [];
             this.receivedSize = 0;
             this.startTime = Date.now();
+            // Notify start
+            this.log(`Receiving ${msg.metadata.name}...`);
           }
         } catch (e) { console.error(e); }
       } 
@@ -170,7 +175,12 @@ export class P2PManager {
 
         if (this.receivedSize >= this.currentFileMeta.size) {
           const blob = new Blob(this.receivedBuffers, { type: this.currentFileMeta.type });
+          
           if (this.fileReceivedCallback) this.fileReceivedCallback(blob, this.currentFileMeta);
+          
+          // Send Notification
+          deviceService.sendNotification('File Received', `Received ${this.currentFileMeta.name}`);
+
           this.receivedBuffers = [];
           this.currentFileMeta = null;
         }
@@ -334,6 +344,10 @@ export class P2PManager {
                   const remaining = this.dataChannel.bufferedAmount || 0;
                   if (remaining === 0) {
                     this.reportProgress(metadata.size, metadata.size, metadata.name);
+                    
+                    // Notify sender completion
+                    deviceService.sendNotification('Transfer Complete', `Sent ${metadata.name}`);
+                    
                     resolve();
                   } else {
                     const finalSent = Math.max(0, metadata.size - remaining);

@@ -4,6 +4,7 @@ import { SenderLobby } from './components/SenderLobby';
 import { ReceiverLobby } from './components/ReceiverLobby';
 import { TransferPanel } from './components/TransferPanel';
 import { p2pManager } from './services/p2p';
+import { deviceService } from './services/device';
 import { ConnectionState, TransferProgress } from './types';
 import { XCircle, Loader2 } from 'lucide-react';
 
@@ -29,10 +30,13 @@ const App: React.FC = () => {
       if (state === 'connected') {
         setAppMode('transfer');
         setErrorMsg(null);
+        // Keep screen awake during transfer session
+        deviceService.enableWakeLock();
       } else if (state === 'failed') {
         setErrorMsg("Connection failed");
       } else if (state === 'disconnected') {
-        // Handle disconnect if needed
+        // We stay in 'transfer' mode so the user can see the "Disconnected" badge in TransferPanel
+        deviceService.disableWakeLock();
       }
     });
 
@@ -53,13 +57,18 @@ const App: React.FC = () => {
 
     return () => {
       p2pManager.cleanup();
+      deviceService.disableWakeLock();
     };
   }, []);
 
-  const handleSelectRole = (role: 'sender' | 'receiver') => {
+  const handleSelectRole = async (role: 'sender' | 'receiver') => {
     setErrorMsg(null);
     setConnectionStatus('');
-    setActiveRole(role); // Set role
+    setActiveRole(role);
+    
+    // Request permission early so we can notify when connected/transferring in background
+    await deviceService.requestNotificationPermission();
+
     if (role === 'sender') {
       const code = Math.floor(100000 + Math.random() * 900000).toString();
       setGeneratedCode(code);
@@ -91,6 +100,7 @@ const App: React.FC = () => {
 
   const handleDisconnect = () => {
     p2pManager.cleanup();
+    deviceService.disableWakeLock();
     setAppMode('welcome');
     setActiveRole(null);
     setConnectionState('idle');
@@ -156,6 +166,7 @@ const App: React.FC = () => {
           {appMode === 'transfer' && (
             <TransferPanel 
               role={activeRole}
+              connectionState={connectionState}
               progress={progress} 
               onSendFiles={handleSendFiles} 
               onDisconnect={handleDisconnect}

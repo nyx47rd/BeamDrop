@@ -6,6 +6,7 @@
 ![Vite](https://img.shields.io/badge/Vite-5.0-646cff?logo=vite&logoColor=white)
 ![TailwindCSS](https://img.shields.io/badge/Tailwind-3.4-38bdf8?logo=tailwindcss&logoColor=white)
 ![WebRTC](https://img.shields.io/badge/Protocol-WebRTC-333333?logo=webrtc&logoColor=white)
+![PWA](https://img.shields.io/badge/PWA-Ready-purple?logo=pwa&logoColor=white)
 
 **BeamDrop** is a modern, secure, and serverless peer-to-peer file transfer application. It establishes a direct connection between devices using **WebRTC**, allowing for unlimited file sharing without intermediate storage servers.
 
@@ -14,12 +15,20 @@ It solves the problem of "How do I get this file from my phone to my laptop (or 
 ## ✨ Features
 
 - **True P2P:** Files go directly from Device A to Device B. No cloud storage.
-- **Smart Connectivity:** Optimized connection logic for mobile networks with **real-time status feedback** (e.g., "Verifying network path...", "Peer found...").
+- **Smart Connectivity:** Optimized connection logic for mobile networks with **real-time status feedback** for both sender and receiver.
+- **PWA Support:** Installable on mobile and desktop. Works as a standalone app with offline shell support.
 - **Easy Pairing:** Uses a simple 6-digit numeric code to handshake (no QR codes required).
-- **Cross-Platform:** Works on any modern browser (Mobile & Desktop).
-- **Modern UI:** Apple-esque dark mode aesthetic designed with TailwindCSS.
+- **Cross-Platform:** Works on any modern browser (iOS, Android, Windows, Mac, Linux).
+- **Modern UI:** Apple-esque dark mode aesthetic with a clean black & white theme.
 - **Secure:** End-to-end encryption provided natively by WebRTC `RTCDataChannel`.
 - **Network Traversal:** Uses public STUN servers to punch through NATs.
+
+## 📱 Progressive Web App (PWA)
+
+BeamDrop is fully PWA compliant:
+- **Installable:** Add to Home Screen on iOS and Android for a native app experience.
+- **Themed:** Custom black background icon and splash screen.
+- **Offline Ready:** App shell loads instantly even on spotty connections.
 
 ##  Architecture & How It Works
 
