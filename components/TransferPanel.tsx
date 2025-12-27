@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useState, memo } from 'react';
 import { Plus, Download, X, Check, Archive, UploadCloud, Wifi, WifiOff } from 'lucide-react';
 import { TransferProgress, ConnectionState } from '../types';
 import JSZip from 'jszip';
+import { deviceService } from '../services/device';
 
 interface Props {
   role: 'sender' | 'receiver' | null;
@@ -146,6 +147,27 @@ export const TransferPanel: React.FC<Props> = ({
     }
   }, [receivedFiles.length, role]);
 
+  // Ensure wake lock is active on mount or interaction
+  useEffect(() => {
+      // Try enabling immediately
+      deviceService.enableWakeLock();
+      
+      // Also add a one-time click listener to body to capture user gesture for video fallback
+      const enableOnInteraction = () => {
+          deviceService.enableWakeLock();
+          document.removeEventListener('click', enableOnInteraction);
+          document.removeEventListener('touchstart', enableOnInteraction);
+      };
+      
+      document.addEventListener('click', enableOnInteraction);
+      document.addEventListener('touchstart', enableOnInteraction);
+
+      return () => {
+          document.removeEventListener('click', enableOnInteraction);
+          document.removeEventListener('touchstart', enableOnInteraction);
+      };
+  }, []);
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       onSendFiles(Array.from(e.target.files));
@@ -173,7 +195,7 @@ export const TransferPanel: React.FC<Props> = ({
   };
 
   return (
-    <div className="w-full flex flex-col h-full py-4 relative">
+    <div className="w-full flex flex-col h-full py-4 relative" onClick={() => deviceService.enableWakeLock()}>
       <Header role={role} connectionState={connectionState} onDisconnect={onDisconnect} />
       
       <ProgressBar progress={progress} />
