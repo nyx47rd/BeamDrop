@@ -226,7 +226,8 @@ export class P2PManager {
 
   private throttledReportProgress(current: number, total: number, name: string) {
       const now = Date.now();
-      if (current >= total || (now - this.lastProgressEmit > 100)) {
+      // Optimization: Increased throttling to 200ms to reduce Main Thread Load
+      if (current >= total || (now - this.lastProgressEmit > 200)) {
           this.reportProgress(current, total, name);
           this.lastProgressEmit = now;
       }
