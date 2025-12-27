@@ -9,14 +9,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "jszip": "3.10.1",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.344.0",
     "mqtt": "^5.3.5",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
-    "@types/jszip": "3.10.0",
+    "@types/jszip": "^3.4.1",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^4.2.1",
