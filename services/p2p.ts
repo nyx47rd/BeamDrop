@@ -4,15 +4,16 @@ import { ConnectionState, FileMetadata, TransferProgress } from '../types';
 const CHUNK_SIZE = 16 * 1024; // 16KB chunks
 const MAX_BUFFERED_AMOUNT = 64 * 1024; // 64KB buffer limit
 
+// Reduced STUN server list to minimize DNS resolution time and gathering latency.
+// Standard WebRTC automatically prefers local (host) candidates for same-wifi connections.
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
+    // Fallback if primary fails
+    { urls: 'stun:stun1.l.google.com:19302' }, 
   ],
   iceCandidatePoolSize: 10,
+  bundlePolicy: 'max-bundle' as RTCBundlePolicy,
 };
 
 export class P2PManager {
@@ -55,18 +56,23 @@ export class P2PManager {
   }
 
   private onSignalingConnected() {
-    console.log("Signaling connected. Waiting for peers...");
+    console.log("Signaling connected. Starting discovery...");
     this.startAnnouncing();
   }
 
   private startAnnouncing() {
     this.stopAnnouncing();
+    
+    // Announce immediately without waiting for interval
     signalingService.sendSignal({ type: 'join', senderId: this.myId });
+
+    // Poll faster (every 1s instead of 2s) to speed up discovery
     this.announceInterval = setInterval(() => {
+        // Only announce if we are not yet deep in connection process
         if (this.connectionState === 'idle' || this.connectionState === 'signaling') {
              signalingService.sendSignal({ type: 'join', senderId: this.myId });
         }
-    }, 2000);
+    }, 1000);
   }
 
   private stopAnnouncing() {
@@ -85,6 +91,7 @@ export class P2PManager {
 
     this.peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
+        // Trickle ICE: Send candidates immediately as they are gathered
         signalingService.sendSignal({
           type: 'candidate',
           candidate: event.candidate,
@@ -174,12 +181,20 @@ export class P2PManager {
 
     try {
       if (data.type === 'join') {
-        if (this.connectionState === 'connected') return;
+        // Optimization: If we are already connecting or connected, ignore redundant join requests
+        // This prevents race conditions where late join signals reset the connection logic.
+        if (this.connectionState === 'connected' || this.connectionState === 'connecting') return;
+
         console.log(`Peer found: ${data.senderId}`);
         this.remotePeerId = data.senderId;
+        
+        // Stop announcing immediately to reduce signaling noise
+        this.stopAnnouncing();
 
+        // Determine Offerer based on ID string comparison to avoid collision
         if (this.myId > data.senderId) {
-            if (this.peerConnection && this.peerConnection.connectionState !== 'connected') {
+            if (this.peerConnection) {
+                // If we had a stale PC, clean it
                 this.cleanupPeerConnection();
             }
             const pc = this.createPeerConnection();
@@ -192,14 +207,19 @@ export class P2PManager {
             this.updateState('connecting');
             signalingService.sendSignal({ type: 'offer', offer, senderId: this.myId });
         } else {
+             // We are the Answerer, just prepare the PC
              if (!this.peerConnection) this.createPeerConnection();
         }
       }
       else if (data.type === 'offer') {
+        // Collision check: if we are supposed to be offerer, ignore incoming offer (rare with id check)
         if (this.myId > data.senderId) return;
+        
         if (!this.peerConnection) this.createPeerConnection();
 
         this.updateState('connecting');
+        this.stopAnnouncing(); // Ensure we stop shouting 'join'
+
         await this.peerConnection!.setRemoteDescription(new RTCSessionDescription(data.offer));
         await this.processIceQueue();
 
@@ -211,6 +231,7 @@ export class P2PManager {
       else if (data.type === 'answer') {
          if (!this.peerConnection) return;
          if (this.peerConnection.signalingState === "stable") return;
+         
          await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
          await this.processIceQueue();
       }
@@ -220,6 +241,7 @@ export class P2PManager {
              try { await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidateInit)); } 
              catch(e) { console.warn("Failed to add ICE candidate", e); }
         } else {
+            // Queue candidate if remote description isn't set yet
             this.iceCandidateQueue.push(candidateInit);
         }
       }
@@ -252,13 +274,13 @@ export class P2PManager {
 
             // High buffer check - wait longer
             if (this.dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) { 
-                setTimeout(sendLoop, 10);
+                setTimeout(sendLoop, 5); // Faster retry than 10ms
                 return;
             }
 
             // Send up to 5 chunks per tick to prevent UI blocking
             let chunksSent = 0;
-            const MAX_CHUNKS_PER_TICK = 5;
+            const MAX_CHUNKS_PER_TICK = 10; // Increased throughput
 
             while (offset < buffer.byteLength && chunksSent < MAX_CHUNKS_PER_TICK) {
                  // Check buffer inside inner loop too
@@ -298,7 +320,7 @@ export class P2PManager {
                   } else {
                     const finalSent = Math.max(0, metadata.size - remaining);
                     this.reportProgress(finalSent, metadata.size, metadata.name);
-                    setTimeout(checkDrain, 50);
+                    setTimeout(checkDrain, 20); // Faster check
                   }
                 };
                 checkDrain();

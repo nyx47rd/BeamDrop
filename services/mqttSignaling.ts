@@ -34,9 +34,9 @@ export class SignalingService {
     this.client = mqtt.connect(BROKER_URL, {
       clientId,
       clean: true,
-      keepalive: 60,
+      keepalive: 15, // Reduced from 60 to 15s to detect mobile disconnects faster
       reconnectPeriod: 1000,
-      connectTimeout: 30 * 1000,
+      connectTimeout: 10 * 1000, // Reduced timeout for faster retry logic
     });
 
     this.client.on('connect', () => {
