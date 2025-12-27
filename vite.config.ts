@@ -9,13 +9,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['icon.svg'],
       workbox: {
-        // Critical for PWA updates:
-        // 1. Delete old caches immediately so they don't conflict
         cleanupOutdatedCaches: true,
-        // 2. Take control of the page immediately, don't wait for a reload
         clientsClaim: true,
         skipWaiting: true,
-        // 3. Don't cache the index.html too aggressively (network first for navigation)
         navigateFallback: null,
       },
       manifest: {
@@ -41,12 +37,28 @@ export default defineConfig({
   ],
   build: {
     outDir: 'dist',
+    target: 'esnext', // Reduces bundle size by removing legacy polyfills
+    minify: 'esbuild', // Faster and efficient
+    cssMinify: true,
+    reportCompressedSize: false, // Speeds up build
     rollupOptions: {
       output: {
-        manualChunks: {
-          'vendor-react': ['react', 'react-dom'],
-          'vendor-utils': ['mqtt', 'jszip'],
-          'vendor-ui': ['lucide-react'],
+        manualChunks(id) {
+          // React Core (High Priority, Cached often)
+          if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) {
+            return 'vendor-react';
+          }
+          // UI Libs (Medium Priority)
+          if (id.includes('node_modules/lucide-react')) {
+            return 'vendor-ui';
+          }
+          // Utilities
+          if (id.includes('node_modules/jszip')) {
+            return 'vendor-utils';
+          }
+          // IMPORTANT: 'mqtt' is purposefully EXCLUDED here.
+          // Since it is dynamically imported in the code, excluding it lets Vite
+          // create a separate async chunk that is ONLY loaded when connecting.
         }
       }
     }
