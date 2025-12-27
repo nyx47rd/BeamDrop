@@ -8,9 +8,11 @@ import { ConnectionState, TransferProgress } from './types';
 import { XCircle, Loader2 } from 'lucide-react';
 
 type AppMode = 'welcome' | 'sender' | 'receiver' | 'transfer';
+type Role = 'sender' | 'receiver' | null;
 
 const App: React.FC = () => {
   const [appMode, setAppMode] = useState<AppMode>('welcome');
+  const [activeRole, setActiveRole] = useState<Role>(null); // Track the role persistently
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
   const [connectionStatus, setConnectionStatus] = useState<string>('');
   const [generatedCode, setGeneratedCode] = useState<string>('');
@@ -57,6 +59,7 @@ const App: React.FC = () => {
   const handleSelectRole = (role: 'sender' | 'receiver') => {
     setErrorMsg(null);
     setConnectionStatus('');
+    setActiveRole(role); // Set role
     if (role === 'sender') {
       const code = Math.floor(100000 + Math.random() * 900000).toString();
       setGeneratedCode(code);
@@ -89,6 +92,7 @@ const App: React.FC = () => {
   const handleDisconnect = () => {
     p2pManager.cleanup();
     setAppMode('welcome');
+    setActiveRole(null);
     setConnectionState('idle');
     setConnectionStatus('');
     setProgress(null);
@@ -151,6 +155,7 @@ const App: React.FC = () => {
 
           {appMode === 'transfer' && (
             <TransferPanel 
+              role={activeRole}
               progress={progress} 
               onSendFiles={handleSendFiles} 
               onDisconnect={handleDisconnect}
