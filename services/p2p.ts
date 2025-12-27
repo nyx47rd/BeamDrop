@@ -2,8 +2,8 @@ import { signalingService } from './mqttSignaling';
 import { ConnectionState, FileMetadata, TransferProgress } from '../types';
 import { deviceService } from './device';
 
-const CHUNK_SIZE = 64 * 1024; // Increased to 64KB for better throughput
-const MAX_BUFFERED_AMOUNT = 256 * 1024; // 256KB limit to prevent backpressure issues
+const CHUNK_SIZE = 64 * 1024; // 64KB chunks
+const MAX_BUFFERED_AMOUNT = 256 * 1024; // 256KB buffer limit
 
 // Reduced STUN server list to minimize DNS resolution time and gathering latency.
 const ICE_SERVERS = {
@@ -293,7 +293,7 @@ export class P2PManager {
   /**
    * MEMORY OPTIMIZED SEND FUNCTION
    * Reads file in chunks instead of loading all to RAM.
-   * Yields to Event Loop to prevent UI freeze.
+   * Yields to Event Loop EVERY CHUNK to prevent UI freeze on mobile.
    */
   public async sendFile(file: File): Promise<void> {
     if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
@@ -343,11 +343,10 @@ export class P2PManager {
         // F. Update Progress (Throttled)
         this.throttledReportProgress(offset, file.size, file.name);
 
-        // G. Essential Yield: Allow Main Thread to breathe every few chunks
-        // Without this, the UI freezes even if using async/await
-        if (offset % (CHUNK_SIZE * 5) === 0) {
-            await new Promise(resolve => setTimeout(resolve, 0)); 
-        }
+        // G. Essential Yield: Allow Main Thread to breathe EVERY chunk.
+        // This is critical for preventing "freezing" on mobile devices during heavy transfer.
+        // Even 0ms timeout pushes the loop to the end of the event queue.
+        await new Promise(resolve => setTimeout(resolve, 0)); 
     }
 
     // 4. Ensure complete

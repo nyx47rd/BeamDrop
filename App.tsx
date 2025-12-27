@@ -1,19 +1,28 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import { WelcomeScreen } from './components/WelcomeScreen';
-import { SenderLobby } from './components/SenderLobby';
-import { ReceiverLobby } from './components/ReceiverLobby';
-import { TransferPanel } from './components/TransferPanel';
 import { p2pManager } from './services/p2p';
 import { deviceService } from './services/device';
 import { ConnectionState, TransferProgress } from './types';
 import { XCircle, Loader2 } from 'lucide-react';
 
+// Lazy load heavy components to improve Initial Load Time (LCP/FCP)
+const SenderLobby = React.lazy(() => import('./components/SenderLobby').then(module => ({ default: module.SenderLobby })));
+const ReceiverLobby = React.lazy(() => import('./components/ReceiverLobby').then(module => ({ default: module.ReceiverLobby })));
+const TransferPanel = React.lazy(() => import('./components/TransferPanel').then(module => ({ default: module.TransferPanel })));
+
 type AppMode = 'welcome' | 'sender' | 'receiver' | 'transfer';
 type Role = 'sender' | 'receiver' | null;
 
+// Simple loading fallback for Suspense
+const LoadingFallback = () => (
+  <div className="flex flex-col items-center justify-center h-full w-full space-y-4 animate-in fade-in">
+    <Loader2 className="w-8 h-8 text-white animate-spin opacity-50" />
+  </div>
+);
+
 const App: React.FC = () => {
   const [appMode, setAppMode] = useState<AppMode>('welcome');
-  const [activeRole, setActiveRole] = useState<Role>(null); // Track the role persistently
+  const [activeRole, setActiveRole] = useState<Role>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
   const [connectionStatus, setConnectionStatus] = useState<string>('');
   const [generatedCode, setGeneratedCode] = useState<string>('');
@@ -30,7 +39,6 @@ const App: React.FC = () => {
       if (state === 'connected') {
         setAppMode('transfer');
         setErrorMsg(null);
-        // Start the actual background loop and set lock screen metadata
         deviceService.enableWakeLock();
         deviceService.enableBackgroundMode();
       } else if (state === 'failed') {
@@ -62,7 +70,6 @@ const App: React.FC = () => {
   }, []);
 
   const handleSelectRole = async (role: 'sender' | 'receiver') => {
-    // CRITICAL: Unlock audio context immediately on user click
     deviceService.prepareForBackground();
     await deviceService.requestNotificationPermission();
 
@@ -81,13 +88,10 @@ const App: React.FC = () => {
   };
 
   const handleReceiverConnect = (code: string) => {
-    // CRITICAL: Ensure audio is ready before async connection starts
     deviceService.prepareForBackground();
-    
     setErrorMsg(null);
     setConnectionStatus('Initializing...');
     p2pManager.init(code);
-    // Stay in receiver mode (which will show loading) until 'connected' event fires
   };
 
   const handleSendFiles = async (files: File[]) => {
@@ -96,7 +100,6 @@ const App: React.FC = () => {
         await p2pManager.sendFile(file);
       }
       
-      // Batch notification logic for Sender
       if (files.length === 1) {
         deviceService.sendNotification('Transfer Complete', `File ${files[0].name} sent`);
       } else if (files.length > 1) {
@@ -126,11 +129,6 @@ const App: React.FC = () => {
 
   return (
     <main className="h-[100dvh] w-full bg-black font-sans overflow-hidden">
-      {/* 
-        Layout Strategy:
-        - Transfer Mode: Fixed container (overflow-hidden) to allow TransferPanel to manage its own internal scrollable lists.
-        - Lobby Modes: Scrollable container (overflow-y-auto) to allow the page to scroll when mobile keyboards cover inputs.
-      */}
       <div className={`w-full h-full ${isTransfer ? 'overflow-hidden flex flex-col items-center justify-center' : 'overflow-y-auto'}`}>
         <div className={`w-full max-w-md mx-auto p-4 ${isTransfer ? 'h-full flex flex-col relative' : 'min-h-full flex flex-col justify-center relative'}`}>
           
@@ -143,47 +141,48 @@ const App: React.FC = () => {
             </div>
           )}
 
-          {appMode === 'welcome' && (
-            <WelcomeScreen onSelectRole={handleSelectRole} />
-          )}
+          <Suspense fallback={<LoadingFallback />}>
+            {appMode === 'welcome' && (
+              <WelcomeScreen onSelectRole={handleSelectRole} />
+            )}
 
-          {appMode === 'sender' && (
-            <SenderLobby code={generatedCode} onBack={handleDisconnect} statusMessage={connectionStatus} />
-          )}
+            {appMode === 'sender' && (
+              <SenderLobby code={generatedCode} onBack={handleDisconnect} statusMessage={connectionStatus} />
+            )}
 
-          {appMode === 'receiver' && (
-            // If we are connecting (and not yet connected), show loading state overlay
-            connectionState === 'signaling' || connectionState === 'connecting' ? (
-              <div role="status" className="flex flex-col items-center justify-center py-20 space-y-6 animate-in fade-in zoom-in flex-1">
-                  <Loader2 className="w-12 h-12 text-white animate-spin opacity-80" aria-hidden="true" />
-                  <div className="text-center space-y-2">
-                    <p className="text-white text-lg font-medium">Connecting to sender...</p>
-                    <p className="text-neutral-500 text-sm animate-pulse max-w-[250px] mx-auto min-h-[1.25rem]">
-                      {connectionStatus}
-                    </p>
-                  </div>
-                  <button 
-                    onClick={handleDisconnect}
-                    className="mt-8 text-neutral-600 text-sm hover:text-white transition-colors"
-                  >
-                    Cancel
-                  </button>
-              </div>
-            ) : (
-              <ReceiverLobby onConnect={handleReceiverConnect} onBack={handleDisconnect} />
-            )
-          )}
+            {appMode === 'receiver' && (
+              connectionState === 'signaling' || connectionState === 'connecting' ? (
+                <div role="status" className="flex flex-col items-center justify-center py-20 space-y-6 animate-in fade-in zoom-in flex-1">
+                    <Loader2 className="w-12 h-12 text-white animate-spin opacity-80" aria-hidden="true" />
+                    <div className="text-center space-y-2">
+                      <p className="text-white text-lg font-medium">Connecting to sender...</p>
+                      <p className="text-neutral-500 text-sm animate-pulse max-w-[250px] mx-auto min-h-[1.25rem]">
+                        {connectionStatus}
+                      </p>
+                    </div>
+                    <button 
+                      onClick={handleDisconnect}
+                      className="mt-8 text-neutral-600 text-sm hover:text-white transition-colors"
+                    >
+                      Cancel
+                    </button>
+                </div>
+              ) : (
+                <ReceiverLobby onConnect={handleReceiverConnect} onBack={handleDisconnect} />
+              )
+            )}
 
-          {appMode === 'transfer' && (
-            <TransferPanel 
-              role={activeRole}
-              connectionState={connectionState}
-              progress={progress} 
-              onSendFiles={handleSendFiles} 
-              onDisconnect={handleDisconnect}
-              receivedFiles={receivedFiles}
-            />
-          )}
+            {appMode === 'transfer' && (
+              <TransferPanel 
+                role={activeRole}
+                connectionState={connectionState}
+                progress={progress} 
+                onSendFiles={handleSendFiles} 
+                onDisconnect={handleDisconnect}
+                receivedFiles={receivedFiles}
+              />
+            )}
+          </Suspense>
         </div>
       </div>
     </main>

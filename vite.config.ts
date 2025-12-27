@@ -31,5 +31,14 @@ export default defineConfig({
   ],
   build: {
     outDir: 'dist',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom'],
+          'vendor-utils': ['mqtt', 'jszip'],
+          'vendor-ui': ['lucide-react'],
+        }
+      }
+    }
   },
 });

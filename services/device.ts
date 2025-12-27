@@ -60,7 +60,7 @@ export class DeviceService {
    * This MUST be called directly from a React onClick handler.
    */
   public prepareForBackground() {
-    if (this.isPrepared) return;
+    if (this.isPrepared || this.backgroundAudio) return;
 
     try {
       // 1 second of silent WAV
@@ -68,7 +68,8 @@ export class DeviceService {
       
       this.backgroundAudio = new Audio(silentWav);
       this.backgroundAudio.loop = true;
-      this.backgroundAudio.volume = 0.01; 
+      // Ultra low volume to prevent any audible artifacts or hardware blocking
+      this.backgroundAudio.volume = 0.0001; 
       this.backgroundAudio.preload = 'auto';
 
       this.backgroundAudio.play().then(() => {
@@ -93,7 +94,7 @@ export class DeviceService {
       this.prepareForBackground();
     }
 
-    if (this.backgroundAudio) {
+    if (this.backgroundAudio && this.backgroundAudio.paused) {
         this.backgroundAudio.play().catch(e => console.error("Bg play failed", e));
     }
 
@@ -112,7 +113,7 @@ export class DeviceService {
       navigator.mediaSession.setActionHandler('stop', () => { /* Prevent stopping */ });
     }
     
-    console.log("Background Persistence: ENABLED (Media Session Active)");
+    console.log("Background Persistence: ENABLED");
   }
 
   public disableBackgroundMode() {
