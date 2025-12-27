@@ -28,8 +28,6 @@ const App: React.FC = () => {
         setErrorMsg(null);
       } else if (state === 'failed') {
         setErrorMsg("Connection failed");
-        // Don't auto-reset appMode immediately so user can see error, 
-        // but typically we might want to let them retry.
       } else if (state === 'disconnected') {
         // Handle disconnect if needed
       }
@@ -91,55 +89,62 @@ const App: React.FC = () => {
     setGeneratedCode('');
   };
 
+  const isTransfer = appMode === 'transfer';
+
   return (
-    // Changed min-h-screen to h-[100dvh] for mobile browsers address bar handling
-    // Adjusted padding and max-width for better mobile centering
-    <main className="h-[100dvh] w-full bg-black flex flex-col items-center justify-center p-4 font-sans overflow-hidden">
-      <div className="w-full max-w-md h-full relative flex flex-col justify-center">
-        
-        {errorMsg && (
-          <div role="alert" className="absolute top-4 left-0 w-full z-50 flex items-center justify-between bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-2xl backdrop-blur-md animate-in fade-in slide-in-from-top-2">
-            <span className="text-sm font-medium">{errorMsg}</span>
-            <button onClick={() => setErrorMsg(null)} aria-label="Dismiss error">
-                <XCircle className="w-5 h-5 opacity-80" />
-            </button>
-          </div>
-        )}
+    <main className="h-[100dvh] w-full bg-black font-sans overflow-hidden">
+      {/* 
+        Layout Strategy:
+        - Transfer Mode: Fixed container (overflow-hidden) to allow TransferPanel to manage its own internal scrollable lists.
+        - Lobby Modes: Scrollable container (overflow-y-auto) to allow the page to scroll when mobile keyboards cover inputs.
+      */}
+      <div className={`w-full h-full ${isTransfer ? 'overflow-hidden flex flex-col items-center justify-center' : 'overflow-y-auto'}`}>
+        <div className={`w-full max-w-md mx-auto p-4 ${isTransfer ? 'h-full flex flex-col relative' : 'min-h-full flex flex-col justify-center relative'}`}>
+          
+          {errorMsg && (
+            <div role="alert" className="absolute top-4 left-0 w-full z-50 flex items-center justify-between bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-2xl backdrop-blur-md animate-in fade-in slide-in-from-top-2">
+              <span className="text-sm font-medium">{errorMsg}</span>
+              <button onClick={() => setErrorMsg(null)} aria-label="Dismiss error">
+                  <XCircle className="w-5 h-5 opacity-80" />
+              </button>
+            </div>
+          )}
 
-        {appMode === 'welcome' && (
-          <WelcomeScreen onSelectRole={handleSelectRole} />
-        )}
+          {appMode === 'welcome' && (
+            <WelcomeScreen onSelectRole={handleSelectRole} />
+          )}
 
-        {appMode === 'sender' && (
-          <SenderLobby code={generatedCode} onBack={handleDisconnect} />
-        )}
+          {appMode === 'sender' && (
+            <SenderLobby code={generatedCode} onBack={handleDisconnect} />
+          )}
 
-        {appMode === 'receiver' && (
-          // If we are connecting (and not yet connected), show loading state overlay on lobby
-          connectionState === 'signaling' || connectionState === 'connecting' ? (
-             <div role="status" className="flex flex-col items-center justify-center py-20 space-y-6 animate-in fade-in zoom-in h-full">
-                <Loader2 className="w-12 h-12 text-white animate-spin opacity-80" aria-hidden="true" />
-                <p className="text-neutral-400 text-lg font-medium">Connecting to sender...</p>
-                <button 
-                  onClick={handleDisconnect}
-                  className="mt-8 text-neutral-600 text-sm hover:text-white transition-colors"
-                >
-                  Cancel
-                </button>
-             </div>
-          ) : (
-            <ReceiverLobby onConnect={handleReceiverConnect} onBack={handleDisconnect} />
-          )
-        )}
+          {appMode === 'receiver' && (
+            // If we are connecting (and not yet connected), show loading state overlay
+            connectionState === 'signaling' || connectionState === 'connecting' ? (
+              <div role="status" className="flex flex-col items-center justify-center py-20 space-y-6 animate-in fade-in zoom-in flex-1">
+                  <Loader2 className="w-12 h-12 text-white animate-spin opacity-80" aria-hidden="true" />
+                  <p className="text-neutral-400 text-lg font-medium">Connecting to sender...</p>
+                  <button 
+                    onClick={handleDisconnect}
+                    className="mt-8 text-neutral-600 text-sm hover:text-white transition-colors"
+                  >
+                    Cancel
+                  </button>
+              </div>
+            ) : (
+              <ReceiverLobby onConnect={handleReceiverConnect} onBack={handleDisconnect} />
+            )
+          )}
 
-        {appMode === 'transfer' && (
-          <TransferPanel 
-            progress={progress} 
-            onSendFiles={handleSendFiles} 
-            onDisconnect={handleDisconnect}
-            receivedFiles={receivedFiles}
-          />
-        )}
+          {appMode === 'transfer' && (
+            <TransferPanel 
+              progress={progress} 
+              onSendFiles={handleSendFiles} 
+              onDisconnect={handleDisconnect}
+              receivedFiles={receivedFiles}
+            />
+          )}
+        </div>
       </div>
     </main>
   );
