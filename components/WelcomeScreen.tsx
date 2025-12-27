@@ -12,7 +12,7 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole }) => {
       {/* Hero Section */}
       <div className="text-center mb-12 space-y-4">
         <div className="w-20 h-20 bg-white rounded-[2rem] mx-auto flex items-center justify-center mb-6 shadow-[0_0_40px_-10px_rgba(255,255,255,0.3)]">
-          <Zap className="w-10 h-10 text-black fill-black" />
+          <Zap className="w-10 h-10 text-black fill-black" aria-hidden="true" />
         </div>
         <h1 className="text-4xl font-bold tracking-tight text-white">BeamDrop</h1>
         <p className="text-neutral-400 text-lg leading-relaxed">
@@ -28,10 +28,10 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole }) => {
           className="group relative flex flex-col items-center justify-center p-6 h-40 bg-[#171717] hover:bg-[#202020] border border-[#262626] rounded-[2rem] transition-all duration-300 hover:scale-[1.02] active:scale-[0.98]"
         >
           <div className="w-12 h-12 rounded-full bg-black flex items-center justify-center mb-4 group-hover:bg-white group-hover:text-black transition-colors duration-300">
-            <Send className="w-5 h-5" />
+            <Send className="w-5 h-5" aria-hidden="true" />
           </div>
           <span className="font-semibold text-neutral-200">Send</span>
-          <span className="text-xs text-neutral-500 mt-1">Create Code</span>
+          <span className="text-xs text-neutral-400 mt-1">Create Code</span>
         </button>
 
         <button
@@ -39,21 +39,21 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole }) => {
           className="group relative flex flex-col items-center justify-center p-6 h-40 bg-[#171717] hover:bg-[#202020] border border-[#262626] rounded-[2rem] transition-all duration-300 hover:scale-[1.02] active:scale-[0.98]"
         >
           <div className="w-12 h-12 rounded-full bg-black flex items-center justify-center mb-4 group-hover:bg-white group-hover:text-black transition-colors duration-300">
-            <Download className="w-5 h-5" />
+            <Download className="w-5 h-5" aria-hidden="true" />
           </div>
           <span className="font-semibold text-neutral-200">Receive</span>
-          <span className="text-xs text-neutral-500 mt-1">Enter Code</span>
+          <span className="text-xs text-neutral-400 mt-1">Enter Code</span>
         </button>
       </div>
 
       {/* Features / Footer */}
-      <div className="flex justify-center gap-6 text-neutral-600 text-xs font-medium uppercase tracking-wider">
+      <div className="flex justify-center gap-6 text-neutral-500 text-xs font-medium uppercase tracking-wider">
         <div className="flex items-center gap-2">
-          <Shield className="w-4 h-4" />
+          <Shield className="w-4 h-4" aria-hidden="true" />
           <span>Encrypted</span>
         </div>
         <div className="flex items-center gap-2">
-          <Globe className="w-4 h-4" />
+          <Globe className="w-4 h-4" aria-hidden="true" />
           <span>P2P Direct</span>
         </div>
       </div>

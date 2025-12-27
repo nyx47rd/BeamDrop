@@ -20,9 +20,10 @@ export const ReceiverLobby: React.FC<Props> = ({ onConnect, onBack }) => {
       <div className="w-full flex justify-start mb-8">
         <button 
           onClick={onBack}
-          className="p-2 -ml-2 text-neutral-500 hover:text-white transition-colors"
+          aria-label="Go back"
+          className="p-2 -ml-2 text-neutral-400 hover:text-white transition-colors"
         >
-          <ArrowLeft className="w-6 h-6" />
+          <ArrowLeft className="w-6 h-6" aria-hidden="true" />
         </button>
       </div>
 
@@ -41,7 +42,8 @@ export const ReceiverLobby: React.FC<Props> = ({ onConnect, onBack }) => {
           value={code}
           onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
           placeholder="000 000"
-          className="w-full bg-[#171717] border border-[#262626] text-center text-5xl font-bold font-mono text-white placeholder-neutral-800 rounded-[2rem] py-12 focus:outline-none focus:border-white/20 focus:bg-[#202020] transition-all duration-300 tracking-widest"
+          aria-label="Enter 6-digit connection code"
+          className="w-full bg-[#171717] border border-[#262626] text-center text-5xl font-bold font-mono text-white placeholder-neutral-600 rounded-[2rem] py-12 focus:outline-none focus:border-white/20 focus:bg-[#202020] transition-all duration-300 tracking-widest"
         />
       </div>
 
@@ -49,10 +51,11 @@ export const ReceiverLobby: React.FC<Props> = ({ onConnect, onBack }) => {
       <button
         onClick={handleConnect}
         disabled={code.length !== 6}
+        aria-label="Connect to sender"
         className="w-full h-16 bg-white text-black font-semibold text-lg rounded-[2rem] hover:scale-[1.02] active:scale-[0.98] disabled:opacity-30 disabled:scale-100 transition-all duration-300 flex items-center justify-center gap-2"
       >
         <span>Connect</span>
-        <ArrowRight className="w-5 h-5" />
+        <ArrowRight className="w-5 h-5" aria-hidden="true" />
       </button>
     </div>
   );

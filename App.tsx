@@ -92,13 +92,13 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-black flex flex-col items-center justify-center p-6 font-sans">
+    <main className="min-h-screen bg-black flex flex-col items-center justify-center p-6 font-sans">
       <div className="w-full max-w-sm relative">
         
         {errorMsg && (
-          <div className="absolute -top-24 left-0 w-full flex items-center justify-between bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-2xl backdrop-blur-md animate-in fade-in slide-in-from-top-2">
+          <div role="alert" className="absolute -top-24 left-0 w-full flex items-center justify-between bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-2xl backdrop-blur-md animate-in fade-in slide-in-from-top-2">
             <span className="text-sm font-medium">{errorMsg}</span>
-            <button onClick={() => setErrorMsg(null)}>
+            <button onClick={() => setErrorMsg(null)} aria-label="Dismiss error">
                 <XCircle className="w-5 h-5 opacity-80" />
             </button>
           </div>
@@ -115,8 +115,8 @@ const App: React.FC = () => {
         {appMode === 'receiver' && (
           // If we are connecting (and not yet connected), show loading state overlay on lobby
           connectionState === 'signaling' || connectionState === 'connecting' ? (
-             <div className="flex flex-col items-center justify-center py-20 space-y-6 animate-in fade-in zoom-in">
-                <Loader2 className="w-12 h-12 text-white animate-spin opacity-80" />
+             <div role="status" className="flex flex-col items-center justify-center py-20 space-y-6 animate-in fade-in zoom-in">
+                <Loader2 className="w-12 h-12 text-white animate-spin opacity-80" aria-hidden="true" />
                 <p className="text-neutral-400 text-lg font-medium">Connecting to sender...</p>
                 <button 
                   onClick={handleDisconnect}
@@ -139,7 +139,7 @@ const App: React.FC = () => {
           />
         )}
       </div>
-    </div>
+    </main>
   );
 };
 

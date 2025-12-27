@@ -20,9 +20,10 @@ export const SenderLobby: React.FC<Props> = ({ code, onBack }) => {
       <div className="w-full flex justify-start mb-8">
         <button 
           onClick={onBack}
-          className="p-2 -ml-2 text-neutral-500 hover:text-white transition-colors"
+          aria-label="Go back"
+          className="p-2 -ml-2 text-neutral-400 hover:text-white transition-colors"
         >
-          <ArrowLeft className="w-6 h-6" />
+          <ArrowLeft className="w-6 h-6" aria-hidden="true" />
         </button>
       </div>
 
@@ -34,6 +35,7 @@ export const SenderLobby: React.FC<Props> = ({ code, onBack }) => {
       {/* Code Display Card */}
       <button 
         onClick={copyToClipboard}
+        aria-label={copied ? "Copied" : "Copy code to clipboard"}
         className="relative w-full max-w-[340px] bg-[#1c1c1e] hover:bg-[#2c2c2e] border border-white/5 rounded-[2.5rem] py-16 flex flex-col items-center justify-center gap-6 group transition-all duration-300 active:scale-[0.98] mb-12 shadow-[0_0_50px_-20px_rgba(0,0,0,0.5)]"
       >
         <div className="flex items-center gap-8">
@@ -45,15 +47,15 @@ export const SenderLobby: React.FC<Props> = ({ code, onBack }) => {
             </span>
         </div>
         
-        <div className={`flex items-center gap-2 text-sm font-medium transition-colors bg-white/5 px-4 py-1.5 rounded-full ${copied ? 'text-green-400 bg-green-400/10' : 'text-neutral-500 group-hover:text-white'}`}>
-          {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+        <div className={`flex items-center gap-2 text-sm font-medium transition-colors bg-white/5 px-4 py-1.5 rounded-full ${copied ? 'text-green-400 bg-green-400/10' : 'text-neutral-400 group-hover:text-white'}`}>
+          {copied ? <Check className="w-3.5 h-3.5" aria-hidden="true" /> : <Copy className="w-3.5 h-3.5" aria-hidden="true" />}
           <span>{copied ? 'Copied!' : 'Tap to copy'}</span>
         </div>
       </button>
 
       {/* Status Indicator */}
-      <div className="flex items-center gap-3 text-neutral-400 bg-[#1c1c1e] border border-white/5 px-6 py-3 rounded-full">
-        <Loader2 className="w-4 h-4 animate-spin text-white" />
+      <div role="status" className="flex items-center gap-3 text-neutral-400 bg-[#1c1c1e] border border-white/5 px-6 py-3 rounded-full">
+        <Loader2 className="w-4 h-4 animate-spin text-white" aria-hidden="true" />
         <span className="text-sm font-medium">Waiting for receiver to join...</span>
       </div>
     </div>
