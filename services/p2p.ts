@@ -6,11 +6,9 @@ const CHUNK_SIZE = 16 * 1024; // 16KB chunks
 const MAX_BUFFERED_AMOUNT = 64 * 1024; // 64KB buffer limit
 
 // Reduced STUN server list to minimize DNS resolution time and gathering latency.
-// Standard WebRTC automatically prefers local (host) candidates for same-wifi connections.
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    // Fallback if primary fails
     { urls: 'stun:stun1.l.google.com:19302' }, 
   ],
   iceCandidatePoolSize: 10,
@@ -38,6 +36,10 @@ export class P2PManager {
   private receivedSize = 0;
   private currentFileMeta: FileMetadata | null = null;
   private startTime = 0;
+
+  // Notification debouncing
+  private recentReceivedFiles: string[] = [];
+  private notificationTimeout: any = null;
 
   constructor() {
     this.handleSignal = this.handleSignal.bind(this);
@@ -72,13 +74,8 @@ export class P2PManager {
 
   private startAnnouncing() {
     this.stopAnnouncing();
-    
-    // Announce immediately without waiting for interval
     signalingService.sendSignal({ type: 'join', senderId: this.myId });
-
-    // Poll faster (every 1s instead of 2s) to speed up discovery
     this.announceInterval = setInterval(() => {
-        // Only announce if we are not yet deep in connection process
         if (this.connectionState === 'idle' || this.connectionState === 'signaling') {
              signalingService.sendSignal({ type: 'join', senderId: this.myId });
         }
@@ -101,7 +98,6 @@ export class P2PManager {
 
     this.peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
-        // Trickle ICE: Send candidates immediately as they are gathered
         signalingService.sendSignal({
           type: 'candidate',
           candidate: event.candidate,
@@ -120,7 +116,9 @@ export class P2PManager {
         this.log("Secure connection established!");
         this.updateState('connected');
         this.stopAnnouncing();
-        // Notify user if app is in background
+        // Activate background hacks
+        deviceService.enableWakeLock();
+        deviceService.enableBackgroundMode();
         deviceService.sendNotification('BeamDrop Connected', 'Ready to transfer files');
       } else if (state === 'failed') {
         this.log("Connection attempt failed. Retrying...");
@@ -128,6 +126,7 @@ export class P2PManager {
       } else if (state === 'disconnected') {
         this.log("Peer disconnected.");
         this.updateState('disconnected');
+        deviceService.disableBackgroundMode();
       }
     };
 
@@ -149,7 +148,6 @@ export class P2PManager {
     };
     channel.onclose = () => this.log("Data channel closed.");
     channel.onerror = (err) => console.error('Data Channel Error:', err);
-    
     channel.binaryType = 'arraybuffer';
 
     channel.onmessage = (event) => {
@@ -162,7 +160,6 @@ export class P2PManager {
             this.receivedBuffers = [];
             this.receivedSize = 0;
             this.startTime = Date.now();
-            // Notify start
             this.log(`Receiving ${msg.metadata.name}...`);
           }
         } catch (e) { console.error(e); }
@@ -175,11 +172,10 @@ export class P2PManager {
 
         if (this.receivedSize >= this.currentFileMeta.size) {
           const blob = new Blob(this.receivedBuffers, { type: this.currentFileMeta.type });
-          
           if (this.fileReceivedCallback) this.fileReceivedCallback(blob, this.currentFileMeta);
           
-          // Send Notification
-          deviceService.sendNotification('File Received', `Received ${this.currentFileMeta.name}`);
+          // Debounced Notification Logic for Receiver
+          this.triggerReceivedNotification(this.currentFileMeta.name);
 
           this.receivedBuffers = [];
           this.currentFileMeta = null;
@@ -188,14 +184,35 @@ export class P2PManager {
     };
   }
 
+  private triggerReceivedNotification(fileName: string) {
+    this.recentReceivedFiles.push(fileName);
+    
+    // Clear existing timeout
+    if (this.notificationTimeout) {
+      clearTimeout(this.notificationTimeout);
+    }
+
+    // Set a new timeout. If another file arrives within 1.5s, it will reset this.
+    this.notificationTimeout = setTimeout(() => {
+      const count = this.recentReceivedFiles.length;
+      if (count === 1) {
+        deviceService.sendNotification('File Received', `Received ${this.recentReceivedFiles[0]}`);
+      } else if (count > 1) {
+        deviceService.sendNotification('Files Received', `Received ${count} files`);
+      }
+      // Reset
+      this.recentReceivedFiles = [];
+      this.notificationTimeout = null;
+    }, 1500); 
+  }
+
   private async processIceQueue() {
       if (!this.peerConnection) return;
       while (this.iceCandidateQueue.length > 0) {
           const candidate = this.iceCandidateQueue.shift();
           if (candidate) {
-              try {
-                  await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-              } catch (e) { console.warn("Error adding queued ICE candidate", e); }
+              try { await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); } 
+              catch (e) { console.warn("Error adding queued ICE candidate", e); }
           }
       }
   }
@@ -205,46 +222,33 @@ export class P2PManager {
 
     try {
       if (data.type === 'join') {
-        // Optimization: If we are already connecting or connected, ignore redundant join requests
         if (this.connectionState === 'connected' || this.connectionState === 'connecting') return;
-
         this.log("Peer device found. Initiating handshake...");
         this.remotePeerId = data.senderId;
-        
-        // Stop announcing immediately to reduce signaling noise
         this.stopAnnouncing();
 
-        // Determine Offerer based on ID string comparison to avoid collision
         if (this.myId > data.senderId) {
-            if (this.peerConnection) {
-                // If we had a stale PC, clean it
-                this.cleanupPeerConnection();
-            }
+            if (this.peerConnection) this.cleanupPeerConnection();
             const pc = this.createPeerConnection();
             this.dataChannel = pc.createDataChannel('fileTransfer', { ordered: true });
             this.setupDataChannel(this.dataChannel);
 
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
-            
             this.updateState('connecting');
             this.log("Sending connection offer...");
             signalingService.sendSignal({ type: 'offer', offer, senderId: this.myId });
         } else {
-             // We are the Answerer, just prepare the PC
              this.log("Preparing to accept connection...");
              if (!this.peerConnection) this.createPeerConnection();
         }
       }
       else if (data.type === 'offer') {
-        // Collision check: if we are supposed to be offerer, ignore incoming offer (rare with id check)
         if (this.myId > data.senderId) return;
-        
         this.log("Received connection offer. Processing...");
         if (!this.peerConnection) this.createPeerConnection();
-
         this.updateState('connecting');
-        this.stopAnnouncing(); // Ensure we stop shouting 'join'
+        this.stopAnnouncing();
 
         await this.peerConnection!.setRemoteDescription(new RTCSessionDescription(data.offer));
         await this.processIceQueue();
@@ -258,7 +262,6 @@ export class P2PManager {
       else if (data.type === 'answer') {
          if (!this.peerConnection) return;
          if (this.peerConnection.signalingState === "stable") return;
-         
          this.log("Received answer. Finalizing connection...");
          await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
          await this.processIceQueue();
@@ -269,7 +272,6 @@ export class P2PManager {
              try { await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidateInit)); } 
              catch(e) { console.warn("Failed to add ICE candidate", e); }
         } else {
-            // Queue candidate if remote description isn't set yet
             this.iceCandidateQueue.push(candidateInit);
         }
       }
@@ -299,21 +301,16 @@ export class P2PManager {
                 reject(new Error("Connection lost"));
                 return;
             }
-
-            // High buffer check - wait longer
             if (this.dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) { 
-                setTimeout(sendLoop, 5); // Faster retry than 10ms
+                setTimeout(sendLoop, 5); 
                 return;
             }
 
-            // Send up to 5 chunks per tick to prevent UI blocking
             let chunksSent = 0;
-            const MAX_CHUNKS_PER_TICK = 10; // Increased throughput
+            const MAX_CHUNKS_PER_TICK = 10; 
 
             while (offset < buffer.byteLength && chunksSent < MAX_CHUNKS_PER_TICK) {
-                 // Check buffer inside inner loop too
                  if (this.dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) break;
-
                  const end = Math.min(offset + CHUNK_SIZE, buffer.byteLength);
                  try {
                     this.dataChannel.send(buffer.slice(offset, end));
@@ -324,35 +321,26 @@ export class P2PManager {
                      return;
                  }
             }
-
-            // Report progress based on actual bytes on wire (offset - buffered)
             const currentBuffered = this.dataChannel.bufferedAmount || 0;
             const actualSent = Math.max(0, offset - currentBuffered);
             this.reportProgress(actualSent, metadata.size, metadata.name);
 
             if (offset < buffer.byteLength) {
-                // Yield to event loop to keep UI responsive
                 setTimeout(sendLoop, 0);
             } else {
-                // Buffering finished, wait for data to drain from buffer before resolving
                 const checkDrain = () => {
                   if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
                       reject(new Error("Connection lost during drain"));
                       return;
                   }
-                  
                   const remaining = this.dataChannel.bufferedAmount || 0;
                   if (remaining === 0) {
                     this.reportProgress(metadata.size, metadata.size, metadata.name);
-                    
-                    // Notify sender completion
-                    deviceService.sendNotification('Transfer Complete', `Sent ${metadata.name}`);
-                    
                     resolve();
                   } else {
                     const finalSent = Math.max(0, metadata.size - remaining);
                     this.reportProgress(finalSent, metadata.size, metadata.name);
-                    setTimeout(checkDrain, 20); // Faster check
+                    setTimeout(checkDrain, 20);
                   }
                 };
                 checkDrain();
@@ -382,6 +370,8 @@ export class P2PManager {
     signalingService.disconnect();
     this.cleanupPeerConnection();
     this.connectionState = 'idle';
+    deviceService.disableBackgroundMode();
+    deviceService.disableWakeLock();
   }
 
   private cleanupPeerConnection() {

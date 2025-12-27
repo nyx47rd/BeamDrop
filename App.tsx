@@ -30,13 +30,14 @@ const App: React.FC = () => {
       if (state === 'connected') {
         setAppMode('transfer');
         setErrorMsg(null);
-        // Keep screen awake during transfer session
+        // Keep screen awake and background active during transfer session
         deviceService.enableWakeLock();
+        deviceService.enableBackgroundMode();
       } else if (state === 'failed') {
         setErrorMsg("Connection failed");
       } else if (state === 'disconnected') {
-        // We stay in 'transfer' mode so the user can see the "Disconnected" badge in TransferPanel
         deviceService.disableWakeLock();
+        deviceService.disableBackgroundMode();
       }
     });
 
@@ -57,7 +58,6 @@ const App: React.FC = () => {
 
     return () => {
       p2pManager.cleanup();
-      deviceService.disableWakeLock();
     };
   }, []);
 
@@ -91,6 +91,14 @@ const App: React.FC = () => {
       for (const file of files) {
         await p2pManager.sendFile(file);
       }
+      
+      // Batch notification logic for Sender
+      if (files.length === 1) {
+        deviceService.sendNotification('Transfer Complete', `File ${files[0].name} sent`);
+      } else if (files.length > 1) {
+        deviceService.sendNotification('Transfer Complete', `${files.length} files sent`);
+      }
+
     } catch (e) {
       console.error(e);
       setErrorMsg("Failed to send files");
@@ -100,7 +108,6 @@ const App: React.FC = () => {
 
   const handleDisconnect = () => {
     p2pManager.cleanup();
-    deviceService.disableWakeLock();
     setAppMode('welcome');
     setActiveRole(null);
     setConnectionState('idle');
