@@ -30,7 +30,7 @@ const App: React.FC = () => {
       if (state === 'connected') {
         setAppMode('transfer');
         setErrorMsg(null);
-        // Keep screen awake and background active during transfer session
+        // Start the actual background loop and set lock screen metadata
         deviceService.enableWakeLock();
         deviceService.enableBackgroundMode();
       } else if (state === 'failed') {
@@ -62,13 +62,14 @@ const App: React.FC = () => {
   }, []);
 
   const handleSelectRole = async (role: 'sender' | 'receiver') => {
+    // CRITICAL: Unlock audio context immediately on user click
+    deviceService.prepareForBackground();
+    await deviceService.requestNotificationPermission();
+
     setErrorMsg(null);
     setConnectionStatus('');
     setActiveRole(role);
     
-    // Request permission early so we can notify when connected/transferring in background
-    await deviceService.requestNotificationPermission();
-
     if (role === 'sender') {
       const code = Math.floor(100000 + Math.random() * 900000).toString();
       setGeneratedCode(code);
@@ -80,6 +81,9 @@ const App: React.FC = () => {
   };
 
   const handleReceiverConnect = (code: string) => {
+    // CRITICAL: Ensure audio is ready before async connection starts
+    deviceService.prepareForBackground();
+    
     setErrorMsg(null);
     setConnectionStatus('Initializing...');
     p2pManager.init(code);
