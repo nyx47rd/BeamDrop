@@ -4,9 +4,10 @@ import { Loader2, Copy, ArrowLeft, Check } from 'lucide-react';
 interface Props {
   code: string;
   onBack: () => void;
+  statusMessage?: string;
 }
 
-export const SenderLobby: React.FC<Props> = ({ code, onBack }) => {
+export const SenderLobby: React.FC<Props> = ({ code, onBack, statusMessage }) => {
   const [copied, setCopied] = useState(false);
 
   const copyToClipboard = () => {
@@ -54,9 +55,14 @@ export const SenderLobby: React.FC<Props> = ({ code, onBack }) => {
       </button>
 
       {/* Status Indicator */}
-      <div role="status" className="flex items-center gap-3 text-neutral-400 bg-[#1c1c1e] border border-white/5 px-6 py-3 rounded-full">
-        <Loader2 className="w-4 h-4 animate-spin text-white" aria-hidden="true" />
-        <span className="text-sm font-medium">Waiting for receiver to join...</span>
+      <div role="status" className="flex flex-col items-center justify-center gap-2 text-neutral-400 bg-[#1c1c1e] border border-white/5 px-6 py-3 rounded-2xl min-w-[200px]">
+        <div className="flex items-center gap-3">
+            <Loader2 className="w-4 h-4 animate-spin text-white" aria-hidden="true" />
+            <span className="text-sm font-medium">Waiting for receiver...</span>
+        </div>
+        {statusMessage && (
+            <span className="text-xs text-neutral-500 animate-pulse">{statusMessage}</span>
+        )}
       </div>
     </div>
   );

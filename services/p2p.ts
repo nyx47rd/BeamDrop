@@ -25,6 +25,7 @@ export class P2PManager {
   private stateChangeCallback: ((state: ConnectionState) => void) | null = null;
   private progressCallback: ((progress: TransferProgress) => void) | null = null;
   private fileReceivedCallback: ((file: Blob, meta: FileMetadata) => void) | null = null;
+  private logCallback: ((msg: string) => void) | null = null;
 
   // Connection management
   private announceInterval: any = null;
@@ -42,6 +43,13 @@ export class P2PManager {
     this.onSignalingConnected = this.onSignalingConnected.bind(this);
   }
 
+  private log(message: string) {
+    console.log(`[P2P] ${message}`);
+    if (this.logCallback) {
+      this.logCallback(message);
+    }
+  }
+
   private updateState(state: ConnectionState) {
     this.connectionState = state;
     if (this.stateChangeCallback) {
@@ -52,11 +60,12 @@ export class P2PManager {
   public init(roomId: string) {
     this.updateState('signaling');
     this.cleanupPeerConnection();
+    this.log("Connecting to signaling network...");
     signalingService.connect(roomId, this.handleSignal, this.onSignalingConnected);
   }
 
   private onSignalingConnected() {
-    console.log("Signaling connected. Starting discovery...");
+    this.log("Signaling connected. Searching for device...");
     this.startAnnouncing();
   }
 
@@ -85,7 +94,7 @@ export class P2PManager {
   private createPeerConnection() {
     if (this.peerConnection) return this.peerConnection;
 
-    console.log("Creating RTCPeerConnection...");
+    this.log("Initializing secure peer connection...");
     this.peerConnection = new RTCPeerConnection(ICE_SERVERS);
     this.iceCandidateQueue = [];
 
@@ -103,19 +112,24 @@ export class P2PManager {
     this.peerConnection.onconnectionstatechange = () => {
       const state = this.peerConnection?.connectionState;
       console.log('PeerConnection State:', state);
-      if (state === 'connected') {
+      
+      if (state === 'connecting') {
+        this.log("Verifying network path (ICE checking)...");
+      } else if (state === 'connected') {
+        this.log("Secure connection established!");
         this.updateState('connected');
         this.stopAnnouncing();
       } else if (state === 'failed') {
+        this.log("Connection attempt failed. Retrying...");
         this.updateState('failed');
-        console.error("ICE connection failed.");
       } else if (state === 'disconnected') {
+        this.log("Peer disconnected.");
         this.updateState('disconnected');
       }
     };
 
     this.peerConnection.ondatachannel = (event) => {
-        console.log("Received DataChannel from remote");
+        this.log("Data channel received. Preparing transfer...");
         this.dataChannel = event.channel;
         this.setupDataChannel(this.dataChannel);
     };
@@ -125,12 +139,12 @@ export class P2PManager {
 
   private setupDataChannel(channel: RTCDataChannel) {
     channel.onopen = () => {
-      console.log('Data Channel OPEN');
+      this.log("Data channel ready. You can now transfer files.");
       if (this.peerConnection?.connectionState === 'connected') {
         this.updateState('connected');
       }
     };
-    channel.onclose = () => console.log('Data Channel CLOSED');
+    channel.onclose = () => this.log("Data channel closed.");
     channel.onerror = (err) => console.error('Data Channel Error:', err);
     
     channel.binaryType = 'arraybuffer';
@@ -182,10 +196,9 @@ export class P2PManager {
     try {
       if (data.type === 'join') {
         // Optimization: If we are already connecting or connected, ignore redundant join requests
-        // This prevents race conditions where late join signals reset the connection logic.
         if (this.connectionState === 'connected' || this.connectionState === 'connecting') return;
 
-        console.log(`Peer found: ${data.senderId}`);
+        this.log("Peer device found. Initiating handshake...");
         this.remotePeerId = data.senderId;
         
         // Stop announcing immediately to reduce signaling noise
@@ -205,9 +218,11 @@ export class P2PManager {
             await pc.setLocalDescription(offer);
             
             this.updateState('connecting');
+            this.log("Sending connection offer...");
             signalingService.sendSignal({ type: 'offer', offer, senderId: this.myId });
         } else {
              // We are the Answerer, just prepare the PC
+             this.log("Preparing to accept connection...");
              if (!this.peerConnection) this.createPeerConnection();
         }
       }
@@ -215,6 +230,7 @@ export class P2PManager {
         // Collision check: if we are supposed to be offerer, ignore incoming offer (rare with id check)
         if (this.myId > data.senderId) return;
         
+        this.log("Received connection offer. Processing...");
         if (!this.peerConnection) this.createPeerConnection();
 
         this.updateState('connecting');
@@ -226,12 +242,14 @@ export class P2PManager {
         const answer = await this.peerConnection!.createAnswer();
         await this.peerConnection!.setLocalDescription(answer);
         
+        this.log("Sending connection answer...");
         signalingService.sendSignal({ type: 'answer', answer, senderId: this.myId });
       }
       else if (data.type === 'answer') {
          if (!this.peerConnection) return;
          if (this.peerConnection.signalingState === "stable") return;
          
+         this.log("Received answer. Finalizing connection...");
          await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
          await this.processIceQueue();
       }
@@ -361,6 +379,7 @@ export class P2PManager {
   public onStateChange(cb: (state: ConnectionState) => void) { this.stateChangeCallback = cb; }
   public onProgress(cb: (progress: TransferProgress) => void) { this.progressCallback = cb; }
   public onFileReceived(cb: (blob: Blob, meta: FileMetadata) => void) { this.fileReceivedCallback = cb; }
+  public onLog(cb: (msg: string) => void) { this.logCallback = cb; }
 }
 
 export const p2pManager = new P2PManager();

@@ -14,6 +14,7 @@ It solves the problem of "How do I get this file from my phone to my laptop (or 
 ## ✨ Features
 
 - **True P2P:** Files go directly from Device A to Device B. No cloud storage.
+- **Smart Connectivity:** Optimized connection logic for mobile networks with **real-time status feedback** (e.g., "Verifying network path...", "Peer found...").
 - **Easy Pairing:** Uses a simple 6-digit numeric code to handshake (no QR codes required).
 - **Cross-Platform:** Works on any modern browser (Mobile & Desktop).
 - **Modern UI:** Apple-esque dark mode aesthetic designed with TailwindCSS.
@@ -29,6 +30,7 @@ BeamDrop utilizes a "Signaling" concept to establish a connection, after which t
     - **Sender** generates a random 6-digit Channel ID.
     - **Receiver** subscribes to that Channel ID.
     - SDP Offers, Answers, and ICE Candidates are exchanged via this MQTT topic.
+    - *New:* connection logs are displayed to the user to indicate the current stage of the handshake (Signaling -> ICE Checking -> Connected).
 
 2.  **Direct Transport (WebRTC):**
     - Once signaling is complete, a standard `RTCPeerConnection` is established.
@@ -46,8 +48,8 @@ BeamDrop utilizes a "Signaling" concept to establish a connection, after which t
 
 1.  **Clone the repository**
     ```bash
-    git clone https://github.com/yourusername/beamdrop-p2p.git
-    cd beamdrop-p2p
+    git clone https://github.com/nyx47rd/beamdrop.git
+    cd beamdrop
     ```
 
 2.  **Install dependencies**

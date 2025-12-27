@@ -12,6 +12,7 @@ type AppMode = 'welcome' | 'sender' | 'receiver' | 'transfer';
 const App: React.FC = () => {
   const [appMode, setAppMode] = useState<AppMode>('welcome');
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
+  const [connectionStatus, setConnectionStatus] = useState<string>('');
   const [generatedCode, setGeneratedCode] = useState<string>('');
   
   const [progress, setProgress] = useState<TransferProgress | null>(null);
@@ -44,6 +45,10 @@ const App: React.FC = () => {
       setReceivedFiles(prev => [...prev, { blob, name: meta.name }]);
     });
 
+    p2pManager.onLog((msg) => {
+      setConnectionStatus(msg);
+    });
+
     return () => {
       p2pManager.cleanup();
     };
@@ -51,6 +56,7 @@ const App: React.FC = () => {
 
   const handleSelectRole = (role: 'sender' | 'receiver') => {
     setErrorMsg(null);
+    setConnectionStatus('');
     if (role === 'sender') {
       const code = Math.floor(100000 + Math.random() * 900000).toString();
       setGeneratedCode(code);
@@ -63,6 +69,7 @@ const App: React.FC = () => {
 
   const handleReceiverConnect = (code: string) => {
     setErrorMsg(null);
+    setConnectionStatus('Initializing...');
     p2pManager.init(code);
     // Stay in receiver mode (which will show loading) until 'connected' event fires
   };
@@ -83,6 +90,7 @@ const App: React.FC = () => {
     p2pManager.cleanup();
     setAppMode('welcome');
     setConnectionState('idle');
+    setConnectionStatus('');
     setProgress(null);
     setReceivedFiles([]);
     setErrorMsg(null);
@@ -115,7 +123,7 @@ const App: React.FC = () => {
           )}
 
           {appMode === 'sender' && (
-            <SenderLobby code={generatedCode} onBack={handleDisconnect} />
+            <SenderLobby code={generatedCode} onBack={handleDisconnect} statusMessage={connectionStatus} />
           )}
 
           {appMode === 'receiver' && (
@@ -123,7 +131,12 @@ const App: React.FC = () => {
             connectionState === 'signaling' || connectionState === 'connecting' ? (
               <div role="status" className="flex flex-col items-center justify-center py-20 space-y-6 animate-in fade-in zoom-in flex-1">
                   <Loader2 className="w-12 h-12 text-white animate-spin opacity-80" aria-hidden="true" />
-                  <p className="text-neutral-400 text-lg font-medium">Connecting to sender...</p>
+                  <div className="text-center space-y-2">
+                    <p className="text-white text-lg font-medium">Connecting to sender...</p>
+                    <p className="text-neutral-500 text-sm animate-pulse max-w-[250px] mx-auto min-h-[1.25rem]">
+                      {connectionStatus}
+                    </p>
+                  </div>
                   <button 
                     onClick={handleDisconnect}
                     className="mt-8 text-neutral-600 text-sm hover:text-white transition-colors"
