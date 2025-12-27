@@ -1,6 +1,7 @@
-import React, { useRef, useEffect } from 'react';
-import { Plus, Download, X, Check } from 'lucide-react';
+import React, { useRef, useEffect, useState } from 'react';
+import { Plus, Download, X, Check, Archive, Maximize2, Minimize2 } from 'lucide-react';
 import { TransferProgress } from '../types';
+import JSZip from 'jszip';
 
 interface Props {
   progress: TransferProgress | null;
@@ -17,6 +18,11 @@ export const TransferPanel: React.FC<Props> = ({
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  
+  // Expandable panel state
+  const [isExpanded, setIsExpanded] = useState(false);
+  const longPressTimerRef = useRef<number>(0);
+  const [isPressing, setIsPressing] = useState(false);
 
   // Auto-scroll to bottom when new files arrive
   useEffect(() => {
@@ -34,8 +40,60 @@ export const TransferPanel: React.FC<Props> = ({
     }
   };
 
+  const handleDownloadAllZip = async (e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent triggering expansion logic
+    if (receivedFiles.length === 0) return;
+
+    try {
+      const zip = new JSZip();
+      
+      // Add files to zip
+      receivedFiles.forEach((file) => {
+        zip.file(file.name, file.blob);
+      });
+
+      // Generate zip with STORE (no compression) for ultra-fast speed
+      const content = await zip.generateAsync({ 
+        type: "blob", 
+        compression: "STORE" 
+      });
+
+      // Trigger download
+      const url = URL.createObjectURL(content);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `beamdrop_files_${Date.now()}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to zip files", err);
+      alert("Failed to create ZIP archive.");
+    }
+  };
+
+  // --- Long Press Logic ---
+  const handlePointerDown = (e: React.PointerEvent) => {
+    setIsPressing(true);
+    longPressTimerRef.current = window.setTimeout(() => {
+      setIsExpanded((prev) => !prev);
+      // Optional: Add haptic feedback if available in browser (rarely supported but good practice)
+      if (navigator.vibrate) navigator.vibrate(50);
+      setIsPressing(false); 
+    }, 500); // 500ms long press threshold
+  };
+
+  const handlePointerUp = () => {
+    clearTimeout(longPressTimerRef.current);
+    setIsPressing(false);
+  };
+
+  const handlePointerLeave = () => {
+    clearTimeout(longPressTimerRef.current);
+    setIsPressing(false);
+  };
+
   return (
-    <div className="w-full flex flex-col h-full py-4">
+    <div className="w-full flex flex-col h-full py-4 relative">
       
       {/* Header / Disconnect */}
       <div className="w-full flex justify-between items-center mb-4 shrink-0 px-2">
@@ -43,7 +101,7 @@ export const TransferPanel: React.FC<Props> = ({
         <button 
             onClick={onDisconnect}
             aria-label="Disconnect and close"
-            className="w-10 h-10 flex items-center justify-center bg-[#1c1c1e] rounded-full text-[#a3a3a3] hover:text-white hover:bg-[#2c2c2e] transition-colors"
+            className="w-10 h-10 flex items-center justify-center bg-[#1c1c1e] rounded-full text-[#a3a3a3] hover:text-white hover:bg-[#2c2c2e] transition-colors z-20"
         >
             <X className="w-5 h-5" aria-hidden="true" />
         </button>
@@ -77,7 +135,7 @@ export const TransferPanel: React.FC<Props> = ({
 
       {/* Main Send Button Area - Perfectly Centered */}
       {!progress && (
-        <div className="flex-1 flex flex-col items-center justify-center w-full min-h-0">
+        <div className={`flex-1 flex flex-col items-center justify-center w-full min-h-0 transition-opacity duration-300 ${isExpanded ? 'opacity-20 pointer-events-none' : 'opacity-100'}`}>
             <button 
               onClick={() => fileInputRef.current?.click()}
               aria-label="Select files to send"
@@ -105,13 +163,49 @@ export const TransferPanel: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Received Files List - Expands when files arrive */}
+      {/* Received Files List - Expands via Long Press */}
       {receivedFiles.length > 0 && (
-          <div className={`w-full flex flex-col transition-all duration-500 ${!progress ? 'h-1/3 min-h-[160px]' : 'flex-1'}`}>
-              <div className="flex items-center gap-2 mb-3 px-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-neutral-500">Received ({receivedFiles.length})</span>
-                <div className="h-px bg-white/10 flex-1"></div>
+          <div 
+            className={`
+              w-full flex flex-col transition-all duration-500 cubic-bezier(0.32, 0.72, 0, 1)
+              bg-black/95 backdrop-blur-xl border-t border-white/10 rounded-t-[2.5rem]
+              ${isExpanded 
+                ? 'fixed bottom-0 left-0 right-0 h-[85vh] z-50 px-4 pb-8 shadow-[0_-10px_40px_rgba(0,0,0,0.8)]' 
+                : !progress ? 'h-1/3 min-h-[160px] border-t-0 bg-transparent backdrop-blur-none' : 'flex-1 border-t-0 bg-transparent backdrop-blur-none'
+              }
+            `}
+          >
+              {/* Header / Drag Handle */}
+              <div 
+                className={`
+                   flex items-center justify-between py-4 select-none touch-none
+                   ${isExpanded ? 'cursor-grab' : 'cursor-pointer'}
+                `}
+                onPointerDown={handlePointerDown}
+                onPointerUp={handlePointerUp}
+                onPointerLeave={handlePointerLeave}
+                onContextMenu={(e) => e.preventDefault()} // Prevent context menu on long press
+              >
+                 <div className="flex items-center gap-3">
+                    <div className={`transition-transform duration-300 ${isPressing ? 'scale-90' : 'scale-100'}`}>
+                        {isExpanded ? <Minimize2 className="w-4 h-4 text-neutral-500"/> : <Maximize2 className="w-4 h-4 text-neutral-500"/>}
+                    </div>
+                    <div>
+                        <span className="text-sm font-bold uppercase tracking-wider text-neutral-400">Received ({receivedFiles.length})</span>
+                        {!isExpanded && <p className="text-[10px] text-neutral-600 font-medium">Hold to expand</p>}
+                    </div>
+                 </div>
+
+                 <button
+                   onClick={handleDownloadAllZip}
+                   className="flex items-center gap-2 bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-full text-xs font-medium transition-colors active:scale-95"
+                 >
+                    <Archive className="w-3.5 h-3.5" />
+                    <span>Save All (ZIP)</span>
+                 </button>
               </div>
+
+              {/* List Content */}
               <div 
                 ref={listRef}
                 className="flex-1 overflow-y-auto pr-1 space-y-3 pb-4"
@@ -142,6 +236,14 @@ export const TransferPanel: React.FC<Props> = ({
                   ))}
               </div>
           </div>
+      )}
+      
+      {/* Overlay when expanded to close by clicking outside */}
+      {isExpanded && (
+        <div 
+            className="fixed inset-0 bg-black/60 z-40 backdrop-blur-sm animate-in fade-in" 
+            onClick={() => setIsExpanded(false)}
+        />
       )}
     </div>
   );
