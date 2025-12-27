@@ -165,6 +165,7 @@ export class P2PManager {
           
           if (msg.type === 'file-start') {
             this.currentFileMeta = msg.metadata;
+            // Immediate Reset for safety
             this.receivedBuffers = [];
             this.receivedSize = 0;
             this.chunksReceivedCount = 0;
@@ -199,11 +200,10 @@ export class P2PManager {
 
         // C. Check Completion
         if (this.receivedSize >= this.currentFileMeta.size) {
-          // Defer Blob creation to next tick to allow UI to update to 100% and ACK to send
-          const meta = this.currentFileMeta; // Capture ref
-          setTimeout(() => {
-             this.finishReceivingFile(meta);
-          }, 50);
+          // CRITICAL FIX: Save file immediately.
+          // Do NOT use setTimeout here, as the next file-start message 
+          // might arrive before the timeout, clearing receivedBuffers.
+          this.finishReceivingFile(this.currentFileMeta);
         }
       }
     };
@@ -218,7 +218,7 @@ export class P2PManager {
           console.error("Failed to assemble file", e);
           this.log("Error: Out of memory assembling file.");
       } finally {
-        // Cleanup memory immediately
+        // Cleanup memory immediately after blob creation
         this.receivedBuffers = [];
         this.currentFileMeta = null;
       }
