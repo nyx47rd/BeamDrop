@@ -40,12 +40,10 @@ const App: React.FC = () => {
         setAppMode('transfer');
         setErrorMsg(null);
         deviceService.enableWakeLock();
-        deviceService.enableBackgroundMode();
       } else if (state === 'failed') {
         setErrorMsg("Connection failed");
       } else if (state === 'disconnected') {
         deviceService.disableWakeLock();
-        deviceService.disableBackgroundMode();
       }
     });
 
@@ -70,7 +68,6 @@ const App: React.FC = () => {
   }, []);
 
   const handleSelectRole = async (role: 'sender' | 'receiver') => {
-    deviceService.prepareForBackground();
     await deviceService.requestNotificationPermission();
 
     setErrorMsg(null);
@@ -88,7 +85,6 @@ const App: React.FC = () => {
   };
 
   const handleReceiverConnect = (code: string) => {
-    deviceService.prepareForBackground();
     setErrorMsg(null);
     setConnectionStatus('Initializing...');
     p2pManager.init(code);

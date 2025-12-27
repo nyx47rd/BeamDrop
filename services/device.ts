@@ -1,7 +1,5 @@
 export class DeviceService {
   private wakeLock: any = null;
-  private backgroundAudio: HTMLAudioElement | null = null;
-  private isPrepared: boolean = false;
 
   /**
    * Request permission to send notifications.
@@ -56,83 +54,14 @@ export class DeviceService {
   }
 
   /**
-   * 1. PRIME THE AUDIO ENGINE
-   * This MUST be called directly from a React onClick handler.
+   * Keep the Screen ON (Wake Lock API)
+   * This is the standard way to prevent the phone from sleeping during transfer.
    */
-  public prepareForBackground() {
-    if (this.isPrepared || this.backgroundAudio) return;
-
-    try {
-      // 1 second of silent WAV
-      const silentWav = 'data:audio/wav;base64,UklGRjIAAABXQVZFZm10IBIAAAABAAEAQB8AAEAfAAABAAgAAABmYWN0BAAAAAAAAABkYXRhAAAAAA==';
-      
-      this.backgroundAudio = new Audio(silentWav);
-      this.backgroundAudio.loop = true;
-      // Ultra low volume to prevent any audible artifacts or hardware blocking
-      this.backgroundAudio.volume = 0.0001; 
-      this.backgroundAudio.preload = 'auto';
-
-      this.backgroundAudio.play().then(() => {
-        this.backgroundAudio?.pause();
-        this.isPrepared = true;
-        console.log("Audio engine unlocked for background persistence");
-      }).catch(e => {
-        console.warn("Audio unlock failed (user gesture required)", e);
-      });
-
-    } catch (e) {
-      console.error("Failed to prepare background audio", e);
-    }
-  }
-
-  /**
-   * 2. START BACKGROUND TASK
-   * Called when P2P connection is established.
-   */
-  public enableBackgroundMode() {
-    if (!this.backgroundAudio) {
-      this.prepareForBackground();
-    }
-
-    if (this.backgroundAudio && this.backgroundAudio.paused) {
-        this.backgroundAudio.play().catch(e => console.error("Bg play failed", e));
-    }
-
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: 'File Transfer Active',
-        artist: 'BeamDrop P2P',
-        album: 'Do not close app',
-        artwork: [
-          { src: '/icon.svg', sizes: '512x512', type: 'image/svg+xml' }
-        ]
-      });
-
-      navigator.mediaSession.setActionHandler('play', () => { this.backgroundAudio?.play(); });
-      navigator.mediaSession.setActionHandler('pause', () => { /* Prevent pausing */ });
-      navigator.mediaSession.setActionHandler('stop', () => { /* Prevent stopping */ });
-    }
-    
-    console.log("Background Persistence: ENABLED");
-  }
-
-  public disableBackgroundMode() {
-    if (this.backgroundAudio) {
-        this.backgroundAudio.pause();
-        this.backgroundAudio.currentTime = 0;
-    }
-    
-    if ('mediaSession' in navigator) {
-        navigator.mediaSession.metadata = null;
-        navigator.mediaSession.playbackState = 'none';
-    }
-    console.log("Background Persistence: DISABLED");
-  }
-
   public async enableWakeLock() {
     if ('wakeLock' in navigator) {
       try {
         this.wakeLock = await (navigator as any).wakeLock.request('screen');
+        console.log("Screen Wake Lock: Active");
       } catch (err) {
         console.warn("WakeLock failed:", err);
       }
@@ -143,12 +72,17 @@ export class DeviceService {
     if (this.wakeLock !== null) {
       await this.wakeLock.release();
       this.wakeLock = null;
+      console.log("Screen Wake Lock: Released");
     }
   }
 
+  /**
+   * Re-acquire lock if user switches apps and comes back
+   */
   public initVisibilityListener() {
     document.addEventListener('visibilitychange', async () => {
       if (this.wakeLock !== null && document.visibilityState === 'visible') {
+        // Re-request lock when app comes to foreground
         await this.enableWakeLock();
       }
     });

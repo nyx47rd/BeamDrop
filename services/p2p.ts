@@ -123,7 +123,6 @@ export class P2PManager {
         this.updateState('connected');
         this.stopAnnouncing();
         deviceService.enableWakeLock();
-        deviceService.enableBackgroundMode();
         deviceService.sendNotification('BeamDrop Connected', 'Ready to transfer files');
       } else if (state === 'failed') {
         this.log("Connection attempt failed. Retrying...");
@@ -131,7 +130,7 @@ export class P2PManager {
       } else if (state === 'disconnected') {
         this.log("Peer disconnected.");
         this.updateState('disconnected');
-        deviceService.disableBackgroundMode();
+        deviceService.disableWakeLock();
       }
     };
 
@@ -201,8 +200,6 @@ export class P2PManager {
         // C. Check Completion
         if (this.receivedSize >= this.currentFileMeta.size) {
           // CRITICAL FIX: Save file immediately.
-          // Do NOT use setTimeout here, as the next file-start message 
-          // might arrive before the timeout, clearing receivedBuffers.
           this.finishReceivingFile(this.currentFileMeta);
         }
       }
@@ -401,7 +398,6 @@ export class P2PManager {
     signalingService.disconnect();
     this.cleanupPeerConnection();
     this.connectionState = 'idle';
-    deviceService.disableBackgroundMode();
     deviceService.disableWakeLock();
   }
 
