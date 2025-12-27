@@ -19,15 +19,14 @@ It solves the problem of "How do I get this file from my phone to my laptop (or 
 - **PWA Support:** Installable on mobile and desktop. Works as a standalone app with offline shell support.
 - **Easy Pairing:** Uses a simple 6-digit numeric code to handshake (no QR codes required).
 - **Cross-Platform:** Works on any modern browser (iOS, Android, Windows, Mac, Linux).
-- **Modern UI:** Apple-esque dark mode aesthetic with a clean black & white theme.
+- **Modern UI:** Dark mode aesthetic with a clean black & white theme.
 - **Secure:** End-to-end encryption provided natively by WebRTC `RTCDataChannel`.
 - **Network Traversal:** Uses public STUN servers to punch through NATs.
 
 ## 📱 Progressive Web App (PWA)
 
 BeamDrop is fully PWA compliant:
-- **Installable:** Add to Home Screen on iOS and Android for a native app experience.
-- **Themed:** Custom black background icon and splash screen.
+- **Installable:** Add to Home Screen on iOS, Android, Mac, Windows, Linux and all other platforms for a native app experience.
 - **Offline Ready:** App shell loads instantly even on spotty connections.
 
 ##  Architecture & How It Works
@@ -92,7 +91,7 @@ Then access the local IP address (e.g., `http://192.168.1.50:5173`) on your phon
 - **P2P Protocol:** Native WebRTC API (`RTCPeerConnection`, `RTCDataChannel`)
 - **Signaling Transport:** MQTT (via `mqtt.js`)
 
-## ⚠️ Limitations (v1.0)
+## ⚠️ Limitations
 
 - **NAT Traversal:** Currently uses Google's public STUN servers. If both users are behind strict Symmetric NATs (e.g., some corporate firewalls or 4G networks), connection might fail without a TURN server.
 - **Signaling:** Uses a public MQTT broker. For a production app, you should host your own Mosquitto or WebSocket server to ensure signaling privacy and uptime.
