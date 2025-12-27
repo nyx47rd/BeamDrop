@@ -2,8 +2,8 @@ import { signalingService } from './mqttSignaling';
 import { ConnectionState, FileMetadata, TransferProgress } from '../types';
 import { deviceService } from './device';
 
-const CHUNK_SIZE = 16 * 1024; // 16KB chunks
-const MAX_BUFFERED_AMOUNT = 64 * 1024; // 64KB buffer limit
+const CHUNK_SIZE = 64 * 1024; // Increased to 64KB for better throughput
+const MAX_BUFFERED_AMOUNT = 256 * 1024; // 256KB limit to prevent backpressure issues
 
 // Reduced STUN server list to minimize DNS resolution time and gathering latency.
 const ICE_SERVERS = {
@@ -36,6 +36,7 @@ export class P2PManager {
   private receivedSize = 0;
   private currentFileMeta: FileMetadata | null = null;
   private startTime = 0;
+  private lastProgressEmit = 0; // Throttling timestamp
 
   // Notification debouncing
   private recentReceivedFiles: string[] = [];
@@ -152,6 +153,8 @@ export class P2PManager {
 
     channel.onmessage = (event) => {
       const { data } = event;
+      
+      // Handle Text Control Messages
       if (typeof data === 'string') {
         try {
           const msg = JSON.parse(data);
@@ -160,23 +163,28 @@ export class P2PManager {
             this.receivedBuffers = [];
             this.receivedSize = 0;
             this.startTime = Date.now();
+            this.lastProgressEmit = 0;
             this.log(`Receiving ${msg.metadata.name}...`);
           }
         } catch (e) { console.error(e); }
       } 
+      // Handle Binary Chunks
       else if (data instanceof ArrayBuffer) {
         if (!this.currentFileMeta) return;
+        
         this.receivedBuffers.push(data);
         this.receivedSize += data.byteLength;
-        this.reportProgress(this.receivedSize, this.currentFileMeta.size, this.currentFileMeta.name);
+        
+        // Throttled Progress Report (Every 100ms max to prevent UI freeze)
+        this.throttledReportProgress(this.receivedSize, this.currentFileMeta.size, this.currentFileMeta.name);
 
         if (this.receivedSize >= this.currentFileMeta.size) {
           const blob = new Blob(this.receivedBuffers, { type: this.currentFileMeta.type });
           if (this.fileReceivedCallback) this.fileReceivedCallback(blob, this.currentFileMeta);
           
-          // Debounced Notification Logic for Receiver
           this.triggerReceivedNotification(this.currentFileMeta.name);
 
+          // Force Cleanup
           this.receivedBuffers = [];
           this.currentFileMeta = null;
         }
@@ -184,15 +192,20 @@ export class P2PManager {
     };
   }
 
+  private throttledReportProgress(current: number, total: number, name: string) {
+      const now = Date.now();
+      // Update if complete OR if 100ms has passed since last update
+      if (current >= total || (now - this.lastProgressEmit > 100)) {
+          this.reportProgress(current, total, name);
+          this.lastProgressEmit = now;
+      }
+  }
+
   private triggerReceivedNotification(fileName: string) {
     this.recentReceivedFiles.push(fileName);
-    
-    // Clear existing timeout
     if (this.notificationTimeout) {
       clearTimeout(this.notificationTimeout);
     }
-
-    // Set a new timeout. If another file arrives within 1.5s, it will reset this.
     this.notificationTimeout = setTimeout(() => {
       const count = this.recentReceivedFiles.length;
       if (count === 1) {
@@ -200,7 +213,6 @@ export class P2PManager {
       } else if (count > 1) {
         deviceService.sendNotification('Files Received', `Received ${count} files`);
       }
-      // Reset
       this.recentReceivedFiles = [];
       this.notificationTimeout = null;
     }, 1500); 
@@ -278,76 +290,68 @@ export class P2PManager {
     } catch (err) { console.error('Signal handling error:', err); }
   }
 
-  public sendFile(file: File): Promise<void> {
-    return new Promise(async (resolve, reject) => {
-        if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
-            reject(new Error("Connection not open"));
-            return;
+  /**
+   * MEMORY OPTIMIZED SEND FUNCTION
+   * Reads file in chunks instead of loading all to RAM.
+   * Yields to Event Loop to prevent UI freeze.
+   */
+  public async sendFile(file: File): Promise<void> {
+    if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
+        throw new Error("Connection not open");
+    }
+
+    const metadata: FileMetadata = {
+        name: file.name,
+        size: file.size,
+        type: file.type,
+    };
+    
+    // 1. Send Metadata
+    this.dataChannel.send(JSON.stringify({ type: 'file-start', metadata }));
+    
+    // 2. Prepare for transfer
+    this.startTime = Date.now();
+    this.lastProgressEmit = 0;
+    let offset = 0;
+
+    // 3. Chunked Read & Send Loop (Async/Await to allow GC and UI updates)
+    while (offset < file.size) {
+        // A. Connection Check
+        if (this.dataChannel.readyState !== 'open') throw new Error("Connection lost");
+
+        // B. Backpressure Control: If buffer is full, wait (Yield)
+        if (this.dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+            await new Promise(resolve => setTimeout(resolve, 50)); // Yield 50ms to drain
+            continue; // Retry loop
         }
 
-        const metadata: FileMetadata = {
-            name: file.name,
-            size: file.size,
-            type: file.type,
-        };
-        this.dataChannel.send(JSON.stringify({ type: 'file-start', metadata }));
+        // C. Read ONLY the current chunk from disk/blob (Memory Safe)
+        const chunkBlob = file.slice(offset, offset + CHUNK_SIZE);
+        const chunkBuffer = await chunkBlob.arrayBuffer();
 
-        const buffer = await file.arrayBuffer();
-        let offset = 0;
-        this.startTime = Date.now();
+        // D. Send
+        try {
+            this.dataChannel.send(chunkBuffer);
+        } catch (e) {
+            console.error("Send failed", e);
+            throw e;
+        }
 
-        const sendLoop = () => {
-            if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
-                reject(new Error("Connection lost"));
-                return;
-            }
-            if (this.dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) { 
-                setTimeout(sendLoop, 5); 
-                return;
-            }
+        // E. Update Offsets
+        offset += chunkBuffer.byteLength;
 
-            let chunksSent = 0;
-            const MAX_CHUNKS_PER_TICK = 10; 
+        // F. Update Progress (Throttled)
+        this.throttledReportProgress(offset, file.size, file.name);
 
-            while (offset < buffer.byteLength && chunksSent < MAX_CHUNKS_PER_TICK) {
-                 if (this.dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) break;
-                 const end = Math.min(offset + CHUNK_SIZE, buffer.byteLength);
-                 try {
-                    this.dataChannel.send(buffer.slice(offset, end));
-                    offset = end;
-                    chunksSent++;
-                 } catch (e) {
-                     reject(e);
-                     return;
-                 }
-            }
-            const currentBuffered = this.dataChannel.bufferedAmount || 0;
-            const actualSent = Math.max(0, offset - currentBuffered);
-            this.reportProgress(actualSent, metadata.size, metadata.name);
+        // G. Essential Yield: Allow Main Thread to breathe every few chunks
+        // Without this, the UI freezes even if using async/await
+        if (offset % (CHUNK_SIZE * 5) === 0) {
+            await new Promise(resolve => setTimeout(resolve, 0)); 
+        }
+    }
 
-            if (offset < buffer.byteLength) {
-                setTimeout(sendLoop, 0);
-            } else {
-                const checkDrain = () => {
-                  if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
-                      reject(new Error("Connection lost during drain"));
-                      return;
-                  }
-                  const remaining = this.dataChannel.bufferedAmount || 0;
-                  if (remaining === 0) {
-                    this.reportProgress(metadata.size, metadata.size, metadata.name);
-                    resolve();
-                  } else {
-                    const finalSent = Math.max(0, metadata.size - remaining);
-                    this.reportProgress(finalSent, metadata.size, metadata.name);
-                    setTimeout(checkDrain, 20);
-                  }
-                };
-                checkDrain();
-            }
-        };
-        sendLoop();
-    });
+    // 4. Ensure complete
+    this.reportProgress(file.size, file.size, file.name);
   }
 
   private reportProgress(current: number, total: number, name: string) {
