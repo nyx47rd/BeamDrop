@@ -1,13 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { ConnectionPanel } from './components/ConnectionPanel';
+import { WelcomeScreen } from './components/WelcomeScreen';
+import { SenderLobby } from './components/SenderLobby';
+import { ReceiverLobby } from './components/ReceiverLobby';
 import { TransferPanel } from './components/TransferPanel';
 import { p2pManager } from './services/p2p';
 import { ConnectionState, TransferProgress } from './types';
-import { Loader2, XCircle } from 'lucide-react';
+import { XCircle, Loader2 } from 'lucide-react';
+
+type AppMode = 'welcome' | 'sender' | 'receiver' | 'transfer';
 
 const App: React.FC = () => {
-  const [isConnected, setIsConnected] = useState(false);
+  const [appMode, setAppMode] = useState<AppMode>('welcome');
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
+  const [generatedCode, setGeneratedCode] = useState<string>('');
+  
   const [progress, setProgress] = useState<TransferProgress | null>(null);
   const [receivedFiles, setReceivedFiles] = useState<{ blob: Blob; name: string }[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -16,22 +22,22 @@ const App: React.FC = () => {
     // Setup listeners
     p2pManager.onStateChange((state) => {
       setConnectionState(state);
+      
       if (state === 'connected') {
-        setIsConnected(true);
+        setAppMode('transfer');
         setErrorMsg(null);
       } else if (state === 'failed') {
         setErrorMsg("Connection failed");
+        // Don't auto-reset appMode immediately so user can see error, 
+        // but typically we might want to let them retry.
       } else if (state === 'disconnected') {
-        // Optional: Reset UI on disconnect
+        // Handle disconnect if needed
       }
     });
 
     p2pManager.onProgress((prog) => {
       setProgress(prog);
       if (prog.isComplete) {
-        // Allow a brief moment to see 100% before clearing, 
-        // but since we might be looping files, we handle that in the sender logic mostly.
-        // This is mainly for the UI update.
         setTimeout(() => setProgress(null), 1000);
       }
     });
@@ -45,16 +51,26 @@ const App: React.FC = () => {
     };
   }, []);
 
-  const handleConnect = (code: string) => {
-    setIsConnected(true);
+  const handleSelectRole = (role: 'sender' | 'receiver') => {
+    setErrorMsg(null);
+    if (role === 'sender') {
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      setGeneratedCode(code);
+      p2pManager.init(code);
+      setAppMode('sender');
+    } else {
+      setAppMode('receiver');
+    }
+  };
+
+  const handleReceiverConnect = (code: string) => {
     setErrorMsg(null);
     p2pManager.init(code);
+    // Stay in receiver mode (which will show loading) until 'connected' event fires
   };
 
   const handleSendFiles = async (files: File[]) => {
     try {
-      // Send files sequentially to ensure the data channel 
-      // and receiver logic handle them correctly without interleaving.
       for (const file of files) {
         await p2pManager.sendFile(file);
       }
@@ -67,19 +83,20 @@ const App: React.FC = () => {
 
   const handleDisconnect = () => {
     p2pManager.cleanup();
-    setIsConnected(false);
+    setAppMode('welcome');
     setConnectionState('idle');
     setProgress(null);
     setReceivedFiles([]);
     setErrorMsg(null);
+    setGeneratedCode('');
   };
 
   return (
-    <div className="min-h-screen bg-black flex flex-col items-center justify-center p-6">
-      
-      <div className="w-full max-w-sm">
+    <div className="min-h-screen bg-black flex flex-col items-center justify-center p-6 font-sans">
+      <div className="w-full max-w-sm relative">
+        
         {errorMsg && (
-          <div className="mb-8 flex items-center justify-between bg-red-900/20 border border-red-900/50 text-red-400 px-4 py-3 rounded-2xl backdrop-blur-md">
+          <div className="absolute -top-24 left-0 w-full flex items-center justify-between bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-2xl backdrop-blur-md animate-in fade-in slide-in-from-top-2">
             <span className="text-sm font-medium">{errorMsg}</span>
             <button onClick={() => setErrorMsg(null)}>
                 <XCircle className="w-5 h-5 opacity-80" />
@@ -87,30 +104,39 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {!isConnected ? (
-          <ConnectionPanel onConnect={handleConnect} />
-        ) : (
-          <div className="animate-in fade-in zoom-in duration-500">
-            {connectionState === 'connected' ? (
-              <TransferPanel 
-                progress={progress} 
-                onSendFiles={handleSendFiles} 
-                onDisconnect={handleDisconnect}
-                receivedFiles={receivedFiles}
-              />
-            ) : (
-              <div className="flex flex-col items-center justify-center py-20 space-y-6">
-                 <Loader2 className="w-10 h-10 text-white animate-spin opacity-80" />
-                 <p className="text-neutral-500 text-sm font-medium tracking-wide">Searching...</p>
-                 <button 
-                    onClick={handleDisconnect}
-                    className="mt-8 text-neutral-600 text-xs hover:text-white transition-colors"
-                 >
-                    Cancel
-                 </button>
-              </div>
-            )}
-          </div>
+        {appMode === 'welcome' && (
+          <WelcomeScreen onSelectRole={handleSelectRole} />
+        )}
+
+        {appMode === 'sender' && (
+          <SenderLobby code={generatedCode} onBack={handleDisconnect} />
+        )}
+
+        {appMode === 'receiver' && (
+          // If we are connecting (and not yet connected), show loading state overlay on lobby
+          connectionState === 'signaling' || connectionState === 'connecting' ? (
+             <div className="flex flex-col items-center justify-center py-20 space-y-6 animate-in fade-in zoom-in">
+                <Loader2 className="w-12 h-12 text-white animate-spin opacity-80" />
+                <p className="text-neutral-400 text-lg font-medium">Connecting to sender...</p>
+                <button 
+                  onClick={handleDisconnect}
+                  className="mt-8 text-neutral-600 text-sm hover:text-white transition-colors"
+                >
+                  Cancel
+                </button>
+             </div>
+          ) : (
+            <ReceiverLobby onConnect={handleReceiverConnect} onBack={handleDisconnect} />
+          )
+        )}
+
+        {appMode === 'transfer' && (
+          <TransferPanel 
+            progress={progress} 
+            onSendFiles={handleSendFiles} 
+            onDisconnect={handleDisconnect}
+            receivedFiles={receivedFiles}
+          />
         )}
       </div>
     </div>
