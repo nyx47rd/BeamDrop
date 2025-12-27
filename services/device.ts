@@ -9,29 +9,46 @@ export class DeviceService {
   public async requestNotificationPermission() {
     if (!('Notification' in window)) return;
     
-    if (Notification.permission === 'default') {
+    // Always request unless explicitly denied
+    if (Notification.permission !== 'denied') {
       await Notification.requestPermission();
     }
   }
 
   /**
-   * Send a system notification.
+   * Send a system notification using Service Worker if available (Standard for Mobile).
    */
-  public sendNotification(title: string, body?: string) {
+  public async sendNotification(title: string, body?: string) {
     if (!('Notification' in window)) return;
 
     if (Notification.permission === 'granted') {
       try {
-        if ('vibrate' in navigator) navigator.vibrate(200);
+        if ('vibrate' in navigator) {
+            try { navigator.vibrate(200); } catch (e) {}
+        }
 
-        new Notification(title, {
+        const options: any = {
           body,
           icon: '/icon.svg',
           badge: '/icon.svg',
           tag: 'beamdrop-transfer',
           renotify: true,
-          requireInteraction: false
-        } as any);
+          requireInteraction: false,
+          silent: false
+        };
+
+        // Priority 1: Use Service Worker (Critical for Android/iOS PWA)
+        if ('serviceWorker' in navigator) {
+            const registration = await navigator.serviceWorker.getRegistration();
+            if (registration && 'showNotification' in registration) {
+                await registration.showNotification(title, options);
+                return;
+            }
+        }
+
+        // Priority 2: Fallback to Classic API (Desktop / Dev)
+        new Notification(title, options);
+
       } catch (e) {
         console.error("Notification failed", e);
       }
@@ -40,30 +57,26 @@ export class DeviceService {
 
   /**
    * 1. PRIME THE AUDIO ENGINE
-   * This MUST be called directly from a React onClick handler (Sender/Receiver selection).
-   * It initializes the audio object and plays/pauses it to unlock the browser's audio context.
+   * This MUST be called directly from a React onClick handler.
    */
   public prepareForBackground() {
     if (this.isPrepared) return;
 
     try {
-      // A slightly longer silent track (WAV) to ensure metadata loads correctly
-      // This is 1 second of silence.
+      // 1 second of silent WAV
       const silentWav = 'data:audio/wav;base64,UklGRjIAAABXQVZFZm10IBIAAAABAAEAQB8AAEAfAAABAAgAAABmYWN0BAAAAAAAAABkYXRhAAAAAA==';
       
       this.backgroundAudio = new Audio(silentWav);
       this.backgroundAudio.loop = true;
-      this.backgroundAudio.volume = 0.01; // iOS sometimes ignores volume 0
+      this.backgroundAudio.volume = 0.01; 
       this.backgroundAudio.preload = 'auto';
 
-      // "Touch" the audio to unlock autoplay limits
       this.backgroundAudio.play().then(() => {
-        // Immediately pause after first touch, we will resume when connection starts
         this.backgroundAudio?.pause();
         this.isPrepared = true;
         console.log("Audio engine unlocked for background persistence");
       }).catch(e => {
-        console.warn("Audio unlock failed (must be triggered by user gesture)", e);
+        console.warn("Audio unlock failed (user gesture required)", e);
       });
 
     } catch (e) {
@@ -74,19 +87,16 @@ export class DeviceService {
   /**
    * 2. START BACKGROUND TASK
    * Called when P2P connection is established.
-   * Resumes the looped audio and sets Media Session metadata.
    */
   public enableBackgroundMode() {
     if (!this.backgroundAudio) {
-      this.prepareForBackground(); // Last ditch attempt
+      this.prepareForBackground();
     }
 
     if (this.backgroundAudio) {
         this.backgroundAudio.play().catch(e => console.error("Bg play failed", e));
     }
 
-    // Set Media Session Metadata
-    // This puts the "Now Playing" widget on the lock screen, which is CRITICAL for iOS background execution.
     if ('mediaSession' in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: 'File Transfer Active',
@@ -97,7 +107,6 @@ export class DeviceService {
         ]
       });
 
-      // Add dummy handlers to prevent the "Pause" button from killing the app
       navigator.mediaSession.setActionHandler('play', () => { this.backgroundAudio?.play(); });
       navigator.mediaSession.setActionHandler('pause', () => { /* Prevent pausing */ });
       navigator.mediaSession.setActionHandler('stop', () => { /* Prevent stopping */ });
@@ -116,7 +125,6 @@ export class DeviceService {
         navigator.mediaSession.metadata = null;
         navigator.mediaSession.playbackState = 'none';
     }
-
     console.log("Background Persistence: DISABLED");
   }
 
