@@ -1,0 +1,5 @@
+{
+  "name": "BeamDrop P2P",
+  "description": "Secure, serverless P2P file transfer directly between devices using WebRTC. works across networks using a 6-digit code.",
+  "requestFramePermissions": []
+}
