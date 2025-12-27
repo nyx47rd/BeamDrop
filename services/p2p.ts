@@ -3,9 +3,10 @@ import { ConnectionState, FileMetadata, TransferProgress } from '../types';
 import { deviceService } from './device';
 
 const CHUNK_SIZE = 64 * 1024; // 64KB chunks
-const MAX_BUFFERED_AMOUNT = 256 * 1024; // 256KB buffer limit
+// ACK_THRESHOLD: Receiver must send ACK every X chunks.
+// 16 chunks * 64KB = 1MB. Sender pauses every 1MB to let Receiver catch up.
+const ACK_THRESHOLD = 16; 
 
-// Reduced STUN server list to minimize DNS resolution time and gathering latency.
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -34,9 +35,13 @@ export class P2PManager {
   // Receiving state
   private receivedBuffers: ArrayBuffer[] = [];
   private receivedSize = 0;
+  private chunksReceivedCount = 0;
   private currentFileMeta: FileMetadata | null = null;
   private startTime = 0;
-  private lastProgressEmit = 0; // Throttling timestamp
+  private lastProgressEmit = 0;
+
+  // Sending state (Flow Control)
+  private ackResolver: (() => void) | null = null;
 
   // Notification debouncing
   private recentReceivedFiles: string[] = [];
@@ -117,7 +122,6 @@ export class P2PManager {
         this.log("Secure connection established!");
         this.updateState('connected');
         this.stopAnnouncing();
-        // Activate background hacks
         deviceService.enableWakeLock();
         deviceService.enableBackgroundMode();
         deviceService.sendNotification('BeamDrop Connected', 'Ready to transfer files');
@@ -154,47 +158,74 @@ export class P2PManager {
     channel.onmessage = (event) => {
       const { data } = event;
       
-      // Handle Text Control Messages
+      // 1. Handle Control Messages (Start, Ack, etc)
       if (typeof data === 'string') {
         try {
           const msg = JSON.parse(data);
+          
           if (msg.type === 'file-start') {
             this.currentFileMeta = msg.metadata;
             this.receivedBuffers = [];
             this.receivedSize = 0;
+            this.chunksReceivedCount = 0;
             this.startTime = Date.now();
             this.lastProgressEmit = 0;
             this.log(`Receiving ${msg.metadata.name}...`);
+          } 
+          else if (msg.type === 'ack') {
+            // Unblock the sender
+            if (this.ackResolver) {
+                this.ackResolver();
+                this.ackResolver = null;
+            }
           }
         } catch (e) { console.error(e); }
       } 
-      // Handle Binary Chunks
+      // 2. Handle Binary Chunks
       else if (data instanceof ArrayBuffer) {
         if (!this.currentFileMeta) return;
         
         this.receivedBuffers.push(data);
         this.receivedSize += data.byteLength;
+        this.chunksReceivedCount++;
         
-        // Throttled Progress Report (Every 100ms max to prevent UI freeze)
+        // A. Send ACK if threshold reached (Flow Control)
+        if (this.chunksReceivedCount % ACK_THRESHOLD === 0) {
+            channel.send(JSON.stringify({ type: 'ack' }));
+        }
+
+        // B. Update Progress UI
         this.throttledReportProgress(this.receivedSize, this.currentFileMeta.size, this.currentFileMeta.name);
 
+        // C. Check Completion
         if (this.receivedSize >= this.currentFileMeta.size) {
-          const blob = new Blob(this.receivedBuffers, { type: this.currentFileMeta.type });
-          if (this.fileReceivedCallback) this.fileReceivedCallback(blob, this.currentFileMeta);
-          
-          this.triggerReceivedNotification(this.currentFileMeta.name);
-
-          // Force Cleanup
-          this.receivedBuffers = [];
-          this.currentFileMeta = null;
+          // Defer Blob creation to next tick to allow UI to update to 100% and ACK to send
+          const meta = this.currentFileMeta; // Capture ref
+          setTimeout(() => {
+             this.finishReceivingFile(meta);
+          }, 50);
         }
       }
     };
   }
 
+  private finishReceivingFile(meta: FileMetadata) {
+      try {
+        const blob = new Blob(this.receivedBuffers, { type: meta.type });
+        if (this.fileReceivedCallback) this.fileReceivedCallback(blob, meta);
+        this.triggerReceivedNotification(meta.name);
+      } catch(e) {
+          console.error("Failed to assemble file", e);
+          this.log("Error: Out of memory assembling file.");
+      } finally {
+        // Cleanup memory immediately
+        this.receivedBuffers = [];
+        this.currentFileMeta = null;
+      }
+  }
+
   private throttledReportProgress(current: number, total: number, name: string) {
       const now = Date.now();
-      // Update if complete OR if 100ms has passed since last update
       if (current >= total || (now - this.lastProgressEmit > 100)) {
           this.reportProgress(current, total, name);
           this.lastProgressEmit = now;
@@ -235,7 +266,7 @@ export class P2PManager {
     try {
       if (data.type === 'join') {
         if (this.connectionState === 'connected' || this.connectionState === 'connecting') return;
-        this.log("Peer device found. Initiating handshake...");
+        this.log("Peer found. Handshaking...");
         this.remotePeerId = data.senderId;
         this.stopAnnouncing();
 
@@ -248,16 +279,13 @@ export class P2PManager {
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
             this.updateState('connecting');
-            this.log("Sending connection offer...");
             signalingService.sendSignal({ type: 'offer', offer, senderId: this.myId });
         } else {
-             this.log("Preparing to accept connection...");
              if (!this.peerConnection) this.createPeerConnection();
         }
       }
       else if (data.type === 'offer') {
         if (this.myId > data.senderId) return;
-        this.log("Received connection offer. Processing...");
         if (!this.peerConnection) this.createPeerConnection();
         this.updateState('connecting');
         this.stopAnnouncing();
@@ -267,14 +295,11 @@ export class P2PManager {
 
         const answer = await this.peerConnection!.createAnswer();
         await this.peerConnection!.setLocalDescription(answer);
-        
-        this.log("Sending connection answer...");
         signalingService.sendSignal({ type: 'answer', answer, senderId: this.myId });
       }
       else if (data.type === 'answer') {
          if (!this.peerConnection) return;
          if (this.peerConnection.signalingState === "stable") return;
-         this.log("Received answer. Finalizing connection...");
          await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
          await this.processIceQueue();
       }
@@ -282,18 +307,17 @@ export class P2PManager {
         const candidateInit = data.candidate;
         if (this.peerConnection && this.peerConnection.remoteDescription && this.peerConnection.signalingState !== 'closed') {
              try { await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidateInit)); } 
-             catch(e) { console.warn("Failed to add ICE candidate", e); }
+             catch(e) { }
         } else {
             this.iceCandidateQueue.push(candidateInit);
         }
       }
-    } catch (err) { console.error('Signal handling error:', err); }
+    } catch (err) { console.error('Signal error', err); }
   }
 
   /**
-   * MEMORY OPTIMIZED SEND FUNCTION
-   * Reads file in chunks instead of loading all to RAM.
-   * Yields to Event Loop EVERY CHUNK to prevent UI freeze on mobile.
+   * ROBUST SEND FUNCTION WITH FLOW CONTROL
+   * Pauses every ACK_THRESHOLD chunks to wait for receiver.
    */
   public async sendFile(file: File): Promise<void> {
     if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
@@ -309,27 +333,20 @@ export class P2PManager {
     // 1. Send Metadata
     this.dataChannel.send(JSON.stringify({ type: 'file-start', metadata }));
     
-    // 2. Prepare for transfer
     this.startTime = Date.now();
     this.lastProgressEmit = 0;
     let offset = 0;
+    let chunkIndex = 0;
 
-    // 3. Chunked Read & Send Loop (Async/Await to allow GC and UI updates)
+    // 2. Read & Send Loop
     while (offset < file.size) {
-        // A. Connection Check
         if (this.dataChannel.readyState !== 'open') throw new Error("Connection lost");
 
-        // B. Backpressure Control: If buffer is full, wait (Yield)
-        if (this.dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
-            await new Promise(resolve => setTimeout(resolve, 50)); // Yield 50ms to drain
-            continue; // Retry loop
-        }
-
-        // C. Read ONLY the current chunk from disk/blob (Memory Safe)
+        // A. Read Chunk
         const chunkBlob = file.slice(offset, offset + CHUNK_SIZE);
         const chunkBuffer = await chunkBlob.arrayBuffer();
 
-        // D. Send
+        // B. Send Chunk
         try {
             this.dataChannel.send(chunkBuffer);
         } catch (e) {
@@ -337,19 +354,29 @@ export class P2PManager {
             throw e;
         }
 
-        // E. Update Offsets
+        // C. FLOW CONTROL: Wait for ACK every X chunks
+        chunkIndex++;
+        if (chunkIndex % ACK_THRESHOLD === 0) {
+            // Create a promise that resolves when 'ack' message arrives in onmessage
+            await new Promise<void>((resolve) => {
+                this.ackResolver = resolve;
+                // Safety timeout: if peer dies or ack lost, don't hang forever (30s)
+                setTimeout(() => {
+                    if (this.ackResolver === resolve) {
+                         console.warn("ACK Timeout, resuming anyway...");
+                         resolve(); 
+                    }
+                }, 10000); 
+            });
+        } else {
+            // If not waiting for ACK, still breathe slightly for UI
+            await new Promise(resolve => setTimeout(resolve, 0));
+        }
+
         offset += chunkBuffer.byteLength;
-
-        // F. Update Progress (Throttled)
         this.throttledReportProgress(offset, file.size, file.name);
-
-        // G. Essential Yield: Allow Main Thread to breathe EVERY chunk.
-        // This is critical for preventing "freezing" on mobile devices during heavy transfer.
-        // Even 0ms timeout pushes the loop to the end of the event queue.
-        await new Promise(resolve => setTimeout(resolve, 0)); 
     }
 
-    // 4. Ensure complete
     this.reportProgress(file.size, file.size, file.name);
   }
 
@@ -381,6 +408,7 @@ export class P2PManager {
     if (this.dataChannel) { this.dataChannel.close(); this.dataChannel = null; }
     if (this.peerConnection) { this.peerConnection.close(); this.peerConnection = null; }
     this.iceCandidateQueue = [];
+    this.receivedBuffers = [];
   }
 
   public onStateChange(cb: (state: ConnectionState) => void) { this.stateChangeCallback = cb; }
