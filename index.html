@@ -30,6 +30,29 @@
         animation: spin 1s linear infinite;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
+      
+      /* Fail-safe error button styles (hidden by default) */
+      #loader-error {
+        display: none;
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        text-align: center;
+        font-family: system-ui, -apple-system, sans-serif;
+        color: white;
+        z-index: 9999;
+      }
+      #loader-error button {
+        margin-top: 16px;
+        padding: 12px 24px;
+        background: white;
+        color: black;
+        border: none;
+        border-radius: 24px;
+        font-weight: bold;
+        cursor: pointer;
+      }
     </style>
   <script type="importmap">
 {
@@ -49,6 +72,39 @@
 </head>
   <body class="bg-black text-white h-[100dvh] antialiased selection:bg-white selection:text-black overflow-hidden">
     <div id="root"></div>
+    
+    <!-- Fail Safe UI -->
+    <div id="loader-error">
+      <p>Update stuck?</p>
+      <button onclick="hardReload()">Repair & Reload</button>
+    </div>
+
     <script type="module" src="/index.tsx"></script>
+    
+    <!-- Fail Safe Script: Runs if React fails to mount in 4 seconds -->
+    <script>
+      setTimeout(() => {
+        const root = document.getElementById('root');
+        // If root is still empty (React hasn't mounted)
+        if (root && !root.hasChildNodes()) {
+          // Hide the spinner CSS
+          root.style.display = 'none';
+          // Show error button
+          document.getElementById('loader-error').style.display = 'block';
+        }
+      }, 4000);
+
+      async function hardReload() {
+        // 1. Unregister all service workers
+        if ('serviceWorker' in navigator) {
+          const registrations = await navigator.serviceWorker.getRegistrations();
+          for (let registration of registrations) {
+            await registration.unregister();
+          }
+        }
+        // 2. Force reload from server (ignoring cache)
+        window.location.reload();
+      }
+    </script>
   </body>
 </html>

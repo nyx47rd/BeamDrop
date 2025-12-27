@@ -8,6 +8,16 @@ export default defineConfig({
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['icon.svg'],
+      workbox: {
+        // Critical for PWA updates:
+        // 1. Delete old caches immediately so they don't conflict
+        cleanupOutdatedCaches: true,
+        // 2. Take control of the page immediately, don't wait for a reload
+        clientsClaim: true,
+        skipWaiting: true,
+        // 3. Don't cache the index.html too aggressively (network first for navigation)
+        navigateFallback: null,
+      },
       manifest: {
         name: 'BeamDrop P2P',
         short_name: 'BeamDrop',
