@@ -1,9 +1,11 @@
+
 import React, { useState, useEffect, Suspense, useCallback } from 'react';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { p2pManager } from './services/p2p';
 import { deviceService } from './services/device';
+import { discoveryService, Peer, Invite } from './services/discovery';
 import { ConnectionState, TransferProgress } from './types';
-import { XCircle, Loader2 } from 'lucide-react';
+import { XCircle, Loader2, User, Check, X } from 'lucide-react';
 
 // Lazy load heavy components
 const SenderLobby = React.lazy(() => import('./components/SenderLobby').then(module => ({ default: module.SenderLobby })));
@@ -46,6 +48,10 @@ const App: React.FC = () => {
   const [receivedFiles, setReceivedFiles] = useState<{ blob: Blob; name: string }[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Discovery State
+  const [lanPeers, setLanPeers] = useState<Peer[]>([]);
+  const [pendingInvite, setPendingInvite] = useState<Invite | null>(null);
+
   // Initialize P2P if starting directly on /send
   useEffect(() => {
     if (appMode === 'sender' && !generatedCode) {
@@ -69,6 +75,28 @@ const App: React.FC = () => {
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
+  }, [appMode]);
+
+  // Discovery Logic (Simulated LAN)
+  useEffect(() => {
+    if (appMode === 'welcome') {
+        discoveryService.init(
+            (peers) => setLanPeers(peers),
+            (invite) => {
+                // If we are already doing something, ignore or queue? 
+                // For simplicity, only accept invites in welcome screen or idle
+                if (appMode === 'welcome') {
+                    setPendingInvite(invite);
+                    deviceService.sendNotification("Incoming Connection", `${invite.fromName} wants to share files`);
+                }
+            }
+        );
+    } else {
+        discoveryService.stop();
+        setLanPeers([]);
+        setPendingInvite(null);
+    }
+    return () => discoveryService.stop();
   }, [appMode]);
 
   // SEO & UX: Dynamic Title and URL Management
@@ -193,6 +221,33 @@ const App: React.FC = () => {
     setGeneratedCode('');
   }, []);
 
+  // Handle LAN/Direct Connect
+  const handleConnectToPeer = (peer: Peer) => {
+      // 1. Generate a room code
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      setGeneratedCode(code);
+      
+      // 2. Init Sender Mode
+      setActiveRole('sender');
+      setAppMode('sender');
+      p2pManager.init(code);
+
+      // 3. Send Invite via Discovery Channel
+      discoveryService.sendInvite(peer.id, code);
+  };
+
+  const handleAcceptInvite = () => {
+      if (!pendingInvite) return;
+      
+      // 1. Init Receiver Mode with the room ID from invite
+      setActiveRole('receiver');
+      setAppMode('receiver');
+      setConnectionStatus('Connecting to ' + pendingInvite.fromName + '...');
+      p2pManager.init(pendingInvite.roomId);
+      
+      setPendingInvite(null);
+  };
+
   const isTransfer = appMode === 'transfer';
 
   return (
@@ -209,9 +264,46 @@ const App: React.FC = () => {
             </div>
           )}
 
+          {/* Invite Modal */}
+          {pendingInvite && (
+              <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in">
+                  <div className="w-full max-w-sm bg-[#1c1c1e] border border-white/10 rounded-[2rem] p-6 shadow-2xl space-y-6">
+                      <div className="flex items-center gap-4">
+                          <div className="w-14 h-14 rounded-full bg-indigo-500/20 flex items-center justify-center">
+                              <User className="w-7 h-7 text-indigo-400" />
+                          </div>
+                          <div>
+                              <h3 className="text-lg font-bold text-white">{pendingInvite.fromName}</h3>
+                              <p className="text-neutral-400 text-sm">wants to connect</p>
+                          </div>
+                      </div>
+                      <div className="flex gap-3">
+                          <button 
+                            onClick={() => setPendingInvite(null)}
+                            className="flex-1 py-4 rounded-2xl bg-neutral-800 text-white font-medium hover:bg-neutral-700 transition-colors flex items-center justify-center gap-2"
+                          >
+                              <X className="w-5 h-5" />
+                              Decline
+                          </button>
+                          <button 
+                            onClick={handleAcceptInvite}
+                            className="flex-1 py-4 rounded-2xl bg-white text-black font-bold hover:bg-neutral-200 transition-colors flex items-center justify-center gap-2"
+                          >
+                              <Check className="w-5 h-5" />
+                              Accept
+                          </button>
+                      </div>
+                  </div>
+              </div>
+          )}
+
           <Suspense fallback={<LoadingFallback />}>
             {appMode === 'welcome' && (
-              <WelcomeScreen onSelectRole={handleSelectRole} />
+              <WelcomeScreen 
+                onSelectRole={handleSelectRole} 
+                lanPeers={lanPeers}
+                onConnectToPeer={handleConnectToPeer}
+              />
             )}
 
             {appMode === 'sender' && (

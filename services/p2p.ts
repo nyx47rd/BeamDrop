@@ -1,11 +1,11 @@
+
 import { signalingService } from './signaling';
 import { ConnectionState, FileMetadata, TransferProgress } from '../types';
 import { deviceService } from './device';
 
-const CHUNK_SIZE = 64 * 1024; // 64KB chunks
-// ACK_THRESHOLD: Receiver must send ACK every X chunks.
-// 16 chunks * 64KB = 1MB. Sender pauses every 1MB to let Receiver catch up.
-const ACK_THRESHOLD = 16; 
+// Constants for Tuning Performance
+const CHUNK_SIZE = 64 * 1024; // 64KB chunks (Sweet spot for WebRTC SCTP)
+const MAX_BUFFER_THRESHOLD = 16 * 1024 * 1024; // 16MB Buffer Limit (Keeps pipe full without crashing browser)
 
 // Expanded STUN server list to improve NAT traversal on mobile networks
 const ICE_SERVERS = {
@@ -42,13 +42,12 @@ export class P2PManager {
   // Receiving state
   private receivedBuffers: ArrayBuffer[] = [];
   private receivedSize = 0;
-  private chunksReceivedCount = 0;
   private currentFileMeta: FileMetadata | null = null;
   private startTime = 0;
   private lastProgressEmit = 0;
 
-  // Sending state (Flow Control)
-  private ackResolver: (() => void) | null = null;
+  // Sending state
+  private finalAckResolver: (() => void) | null = null;
 
   // Notification debouncing
   private recentReceivedFiles: string[] = [];
@@ -153,18 +152,22 @@ export class P2PManager {
   private setupDataChannel(channel: RTCDataChannel) {
     channel.onopen = () => {
       this.log("Data channel ready. You can now transfer files.");
+      // Set high throughput binary type
+      channel.binaryType = 'arraybuffer';
+      // Configure buffer threshold for backpressure
+      channel.bufferedAmountLowThreshold = 65536; // 64KB
+      
       if (this.peerConnection?.connectionState === 'connected') {
         this.updateState('connected');
       }
     };
     channel.onclose = () => this.log("Data channel closed.");
     channel.onerror = (err) => console.error('Data Channel Error:', err);
-    channel.binaryType = 'arraybuffer';
 
     channel.onmessage = (event) => {
       const { data } = event;
       
-      // 1. Handle Control Messages (Start, Ack, etc)
+      // 1. Handle Control Messages (Start, End, Ack)
       if (typeof data === 'string') {
         try {
           const msg = JSON.parse(data);
@@ -174,41 +177,36 @@ export class P2PManager {
             // Immediate Reset for safety
             this.receivedBuffers = [];
             this.receivedSize = 0;
-            this.chunksReceivedCount = 0;
             this.startTime = Date.now();
             this.lastProgressEmit = 0;
             this.log(`Receiving ${msg.metadata.name}...`);
           } 
-          else if (msg.type === 'ack') {
-            // Unblock the sender
-            if (this.ackResolver) {
-                this.ackResolver();
-                this.ackResolver = null;
+          else if (msg.type === 'file-end') {
+             // File transfer complete signal from sender
+             if (this.currentFileMeta) {
+                 this.finishReceivingFile(this.currentFileMeta);
+                 // Send Final ACK to let sender know we saved it
+                 channel.send(JSON.stringify({ type: 'ack-finish' }));
+             }
+          }
+          else if (msg.type === 'ack-finish') {
+            // Receiver saved the file, we can unblock
+            if (this.finalAckResolver) {
+                this.finalAckResolver();
+                this.finalAckResolver = null;
             }
           }
         } catch (e) { console.error(e); }
       } 
-      // 2. Handle Binary Chunks
+      // 2. Handle Binary Chunks (OPTIMIZED PATH)
       else if (data instanceof ArrayBuffer) {
         if (!this.currentFileMeta) return;
         
         this.receivedBuffers.push(data);
         this.receivedSize += data.byteLength;
-        this.chunksReceivedCount++;
         
-        // A. Send ACK if threshold reached (Flow Control)
-        if (this.chunksReceivedCount % ACK_THRESHOLD === 0) {
-            channel.send(JSON.stringify({ type: 'ack' }));
-        }
-
-        // B. Update Progress UI
+        // Update Progress UI (Throttled)
         this.throttledReportProgress(this.receivedSize, this.currentFileMeta.size, this.currentFileMeta.name);
-
-        // C. Check Completion
-        if (this.receivedSize >= this.currentFileMeta.size) {
-          // CRITICAL FIX: Save file immediately.
-          this.finishReceivingFile(this.currentFileMeta);
-        }
       }
     };
   }
@@ -218,6 +216,8 @@ export class P2PManager {
         const blob = new Blob(this.receivedBuffers, { type: meta.type });
         if (this.fileReceivedCallback) this.fileReceivedCallback(blob, meta);
         this.triggerReceivedNotification(meta.name);
+        // Force 100% progress
+        this.reportProgress(meta.size, meta.size, meta.name);
       } catch(e) {
           console.error("Failed to assemble file", e);
           this.log("Error: Out of memory assembling file.");
@@ -230,8 +230,8 @@ export class P2PManager {
 
   private throttledReportProgress(current: number, total: number, name: string) {
       const now = Date.now();
-      // Optimization: Increased throttling to 200ms to reduce Main Thread Load
-      if (current >= total || (now - this.lastProgressEmit > 200)) {
+      // Optimization: Update UI every ~100ms max to save CPU
+      if (current >= total || (now - this.lastProgressEmit > 100)) {
           this.reportProgress(current, total, name);
           this.lastProgressEmit = now;
       }
@@ -278,7 +278,10 @@ export class P2PManager {
         if (this.myId > data.senderId) {
             if (this.peerConnection) this.cleanupPeerConnection();
             const pc = this.createPeerConnection();
-            this.dataChannel = pc.createDataChannel('fileTransfer', { ordered: true });
+            this.dataChannel = pc.createDataChannel('fileTransfer', { 
+                ordered: true,
+                maxRetransmits: 30 // Stop trying if packet is lost for too long (improves latency)
+            });
             this.setupDataChannel(this.dataChannel);
 
             const offer = await pc.createOffer();
@@ -321,8 +324,9 @@ export class P2PManager {
   }
 
   /**
-   * ROBUST SEND FUNCTION WITH FLOW CONTROL
-   * Pauses every ACK_THRESHOLD chunks to wait for receiver.
+   * HIGH PERFORMANCE SEND FUNCTION (Backpressure)
+   * Uses bufferedAmount to fill the pipe without overwhelming the network or memory.
+   * No application-layer ACKs during transfer.
    */
   public async sendFile(file: File): Promise<void> {
     if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
@@ -341,17 +345,29 @@ export class P2PManager {
     this.startTime = Date.now();
     this.lastProgressEmit = 0;
     let offset = 0;
-    let chunkIndex = 0;
 
-    // 2. Read & Send Loop
+    // 2. Read & Send Loop (Backpressure optimized)
     while (offset < file.size) {
         if (this.dataChannel.readyState !== 'open') throw new Error("Connection lost");
 
-        // A. Read Chunk
+        // A. Check Buffer Pressure
+        // If the outbound buffer is full (16MB), wait until it drains to 0 (or low threshold)
+        if (this.dataChannel.bufferedAmount > MAX_BUFFER_THRESHOLD) {
+            await new Promise<void>(resolve => {
+                if (!this.dataChannel) return resolve();
+                const handler = () => {
+                    this.dataChannel!.removeEventListener('bufferedamountlow', handler);
+                    resolve();
+                };
+                this.dataChannel.addEventListener('bufferedamountlow', handler);
+            });
+        }
+
+        // B. Read Chunk
         const chunkBlob = file.slice(offset, offset + CHUNK_SIZE);
         const chunkBuffer = await chunkBlob.arrayBuffer();
 
-        // B. Send Chunk
+        // C. Send Chunk
         try {
             this.dataChannel.send(chunkBuffer);
         } catch (e) {
@@ -359,28 +375,18 @@ export class P2PManager {
             throw e;
         }
 
-        // C. FLOW CONTROL: Wait for ACK every X chunks
-        chunkIndex++;
-        if (chunkIndex % ACK_THRESHOLD === 0) {
-            // Create a promise that resolves when 'ack' message arrives in onmessage
-            await new Promise<void>((resolve) => {
-                this.ackResolver = resolve;
-                // Safety timeout: if peer dies or ack lost, don't hang forever (30s)
-                setTimeout(() => {
-                    if (this.ackResolver === resolve) {
-                         console.warn("ACK Timeout, resuming anyway...");
-                         resolve(); 
-                    }
-                }, 10000); 
-            });
-        } else {
-            // If not waiting for ACK, still breathe slightly for UI
-            await new Promise(resolve => setTimeout(resolve, 0));
-        }
-
         offset += chunkBuffer.byteLength;
         this.throttledReportProgress(offset, file.size, file.name);
     }
+
+    // 3. End Signal & Wait for Confirmation
+    this.dataChannel.send(JSON.stringify({ type: 'file-end' }));
+    
+    // Wait for the receiver to say "I have written the file"
+    await new Promise<void>((resolve) => {
+        this.finalAckResolver = resolve;
+        setTimeout(() => resolve(), 30000); // 30s timeout safety
+    });
 
     this.reportProgress(file.size, file.size, file.name);
   }
@@ -389,7 +395,10 @@ export class P2PManager {
     if (this.progressCallback) {
         const elapsed = (Date.now() - this.startTime) / 1000;
         const speed = elapsed > 0 ? current / elapsed : 0;
-        const speedStr = speed > 1024 * 1024 ? `${(speed / (1024 * 1024)).toFixed(1)} MB/s` : `${(speed / 1024).toFixed(1)} KB/s`;
+        const speedStr = speed > 1024 * 1024 
+            ? `${(speed / (1024 * 1024)).toFixed(1)} MB/s` 
+            : `${(speed / 1024).toFixed(1)} KB/s`;
+            
         this.progressCallback({
             fileName: name,
             transferredBytes: current,

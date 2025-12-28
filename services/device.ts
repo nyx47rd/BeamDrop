@@ -1,11 +1,37 @@
+
 // Base64 of a tiny 1x1 pixel silent MP4 video
 // This is used to trick mobile browsers into keeping the screen on when the Native API fails.
 const NO_SLEEP_VIDEO_BASE64 = "data:video/mp4;base64,AAAAHGZ0eXBNNEVAAAAAAAAAACMZnJlZQAAAAAAAAAAEAAvY21vb3YAAABsbXZoAAAAAgAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAGGlvZHMAAAAAEICAgAcAAAAAAAAAAAAAABx0cmFrAAAAXHRraGQAAAAuAAAAAAAAAAAAAAABAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAABAAAAAAQAAAAAAABhmdHlwbXA0MgAAAABtcDQyaXNvbQAAAAx1ZHRhAAAAZ21ldGEAAAAAAAAAIWhkbHIAAAAAAAAAAG1kaXJhcHBsAAAAAAAAAAAAAAAlLWlsc3QAAAAZcHRvbwAAAAwAAAABZmZtcGVnAAAAAC0AAAAhZGF0YQAAAAEAAAAAMTAwLjEwMC4xMDAuMTAw/60AAABBst3R";
+
+const ADJECTIVES = ['Red', 'Blue', 'Green', 'Fast', 'Silent', 'Cosmic', 'Neon', 'Swift'];
+const ANIMALS = ['Fox', 'Eagle', 'Bear', 'Wolf', 'Hawk', 'Tiger', 'Falcon', 'Panda'];
 
 export class DeviceService {
   private wakeLock: any = null;
   private noSleepVideo: HTMLVideoElement | null = null;
   private isLocking = false;
+  private deviceName: string = '';
+
+  constructor() {
+    this.deviceName = localStorage.getItem('beamdrop_device_name') || this.generateRandomName();
+    localStorage.setItem('beamdrop_device_name', this.deviceName);
+  }
+
+  private generateRandomName() {
+    const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+    const animal = ANIMALS[Math.floor(Math.random() * ANIMALS.length)];
+    const num = Math.floor(Math.random() * 99) + 1;
+    return `${adj} ${animal} ${num}`;
+  }
+
+  public getDeviceName(): string {
+    return this.deviceName;
+  }
+
+  public setDeviceName(name: string) {
+    this.deviceName = name.trim();
+    localStorage.setItem('beamdrop_device_name', this.deviceName);
+  }
 
   /**
    * Request permission to send notifications.

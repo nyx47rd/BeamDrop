@@ -24,9 +24,9 @@ export default defineConfig({
         theme_color: '#000000',
         background_color: '#000000',
         display: 'standalone',
+        orientation: 'portrait',
         scope: '/',
         start_url: '/',
-        orientation: 'portrait',
         icons: [
           {
             src: 'icon.svg',
@@ -37,12 +37,14 @@ export default defineConfig({
           {
             src: 'favicon.png',
             sizes: '192x192',
-            type: 'image/png'
+            type: 'image/png',
+            purpose: 'any'
           },
           {
             src: 'favicon.png', 
             sizes: '512x512',
-            type: 'image/png'
+            type: 'image/png',
+            purpose: 'any'
           }
         ]
       }
