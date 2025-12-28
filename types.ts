@@ -1,4 +1,5 @@
 
+
 export interface FileMetadata {
   name: string;
   size: number;
@@ -20,13 +21,12 @@ export interface ProgressReport {
 }
 
 export interface ChunkData {
-  type: 'offer-batch' | 'accept-batch' | 'file-start' | 'ready-for-file' | 'file-chunk' | 'file-end' | 'ack-file' | 'progress-sync' | 'request-retransmit';
+  type: 'offer-batch' | 'accept-batch' | 'file-start' | 'ready-for-file' | 'file-chunk' | 'file-end' | 'ack-file' | 'progress-sync';
   metadata?: FileMetadata;
   batchMeta?: BatchMetadata;
   progressReport?: ProgressReport;
   data?: string; // Base64 encoded for simplicity in JSON, or ArrayBuffer handling
   chunkIndex?: number;
-  chunks?: number[]; // Array of missing chunk indices for retransmission
 }
 
 export type ConnectionState = 'idle' | 'signaling' | 'connecting' | 'connected' | 'disconnected' | 'failed';

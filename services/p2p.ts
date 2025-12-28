@@ -16,7 +16,7 @@ export class P2PManager {
 
   // Connection Resources
   private controlChannel: RTCDataChannel | null = null;
-  private dataChannels: RTCDataChannel[] = [];
+  private transferChannel: RTCDataChannel | null = null;
   
   private announceInterval: any = null;
 
@@ -57,7 +57,7 @@ export class P2PManager {
   cleanup() { 
       this.peerConnection?.close(); 
       this.peerConnection = null; 
-      this.dataChannels = [];
+      this.transferChannel = null;
       this.controlChannel = null;
       
       this.sender.cleanup();
@@ -111,33 +111,30 @@ export class P2PManager {
       
       if (ch.label === 'control') {
           this.controlChannel = ch;
+          this.sender.setControlChannel(ch);
           this.receiver.setControlChannel(ch);
-      } else {
-          this.dataChannels.push(ch);
-      }
-      
-      // CRITICAL: Unified Message Router
-      // We must route messages to BOTH managers because they both need to see Control messages.
-      // - Receiver needs to see 'offer-batch', 'file-start'
-      // - Sender needs to see 'accept-batch', 'ready-for-file', 'progress-sync'
-      ch.onmessage = (e) => {
-          const isBinary = e.data instanceof ArrayBuffer;
-          const data = isBinary ? e.data : JSON.parse(e.data);
           
-          // Receiver handles everything (Binary Chunks + Control Commands)
-          this.receiver.handleMessage(data, isBinary);
-          
-          // Sender only listens for Control Responses (JSON)
-          if (!isBinary) {
-              this.sender.handleMessage(data);
+          ch.onmessage = (e) => {
+              const data = JSON.parse(e.data);
+              this.receiver.handleControlMessage(data);
+              this.sender.handleControlMessage(data);
           }
-      };
+      } 
+      else if (ch.label === 'transfer') {
+          this.transferChannel = ch;
+          this.sender.setTransferChannel(ch);
+          
+          // Receiver listens to binary on this channel
+          ch.onmessage = (e) => {
+              if (e.data instanceof ArrayBuffer) {
+                  this.receiver.handleBinaryChunk(e.data);
+              }
+          };
+      }
 
-      // Check if all channels are ready to arm the Sender
-      if (this.controlChannel && this.dataChannels.length >= 3) { 
-           this.sender.setChannels(this.controlChannel, this.dataChannels);
-      } else if (this.controlChannel) {
-           this.sender.setChannels(this.controlChannel, this.dataChannels);
+      // Check if ready
+      if (this.controlChannel && this.transferChannel) {
+          console.log("P2P: All channels ready");
       }
   }
 
@@ -148,17 +145,16 @@ export class P2PManager {
           if (data.type === 'join') {
              if (this.connectionState === 'connected') return;
              if (this.myId > data.senderId) {
-                 // I am the Initiator (Sender Role usually starts here)
+                 // I am the Initiator
                  this.setupPeer();
                  
-                 // Create Channels
+                 // Create Channels (Ordered = true guarantees delivery)
                  const control = this.peerConnection!.createDataChannel('control', { ordered: true });
                  this.setupChannel(control);
                  
-                 for(let i=0; i<3; i++) {
-                     const dataCh = this.peerConnection!.createDataChannel(`data_${i}`, { ordered: false });
-                     this.setupChannel(dataCh);
-                 }
+                 // Main transfer channel - Ordered TRUE is crucial for simplicity and preventing missing chunks
+                 const transfer = this.peerConnection!.createDataChannel('transfer', { ordered: true });
+                 this.setupChannel(transfer);
                  
                  const offer = await this.peerConnection!.createOffer();
                  await this.peerConnection!.setLocalDescription(offer);
@@ -185,7 +181,6 @@ export class P2PManager {
 
   private startAnnouncing() {
      if (this.announceInterval) clearInterval(this.announceInterval);
-     
      const run = () => signalingService.sendSignal({ type: 'join', senderId: this.myId });
      run();
      this.announceInterval = setInterval(run, 2000);

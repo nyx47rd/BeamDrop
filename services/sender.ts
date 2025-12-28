@@ -3,25 +3,23 @@ import { TransferProgress } from '../types';
 import { deviceService } from './device';
 import { TransferMonitor } from './stats'; 
 
+// Increased chunk size for efficiency since we are using backpressure
 const CHUNK_SIZE = 64 * 1024; // 64KB
-const HEADER_SIZE = 4;
-const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024; // 16MB
+const MAX_BUFFERED_AMOUNT = 64 * 1024; // Wait if buffer > 64KB
 
 const createWorker = () => new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
 
 export class SenderManager {
     private controlChannel: RTCDataChannel | null = null;
-    private dataChannels: RTCDataChannel[] = [];
+    private transferChannel: RTCDataChannel | null = null;
     private worker: Worker;
     private queue: File[] = [];
     private isSending = false;
     
     private pendingControlResolvers: Map<string, () => void> = new Map();
-    private monitorHelper = new TransferMonitor(); 
     private onProgress: (p: TransferProgress) => void;
     
     private currentFileName = '';
-    private currentFile: File | null = null; // Keep reference for retransmission
     private totalFiles = 0;
     private totalSize = 0;
     
@@ -30,12 +28,14 @@ export class SenderManager {
         this.worker = createWorker();
     }
 
-    public setChannels(control: RTCDataChannel, data: RTCDataChannel[]) {
-        this.controlChannel = control;
-        this.dataChannels = data;
+    public setControlChannel(ch: RTCDataChannel) { this.controlChannel = ch; }
+    public setTransferChannel(ch: RTCDataChannel) { 
+        this.transferChannel = ch; 
+        // Important: Set low threshold to trigger the event correctly
+        this.transferChannel.bufferedAmountLowThreshold = 0;
     }
 
-    public handleMessage(msg: any) {
+    public handleControlMessage(msg: any) {
         if (msg.type === 'progress-sync' && msg.progressReport) {
             const r = msg.progressReport;
             this.onProgress({
@@ -52,15 +52,6 @@ export class SenderManager {
             });
         }
         
-        // --- RETRANSMISSION REQUEST ---
-        if (msg.type === 'request-retransmit' && msg.chunks && this.currentFile) {
-            console.log(`Sender: Retransmitting ${msg.chunks.length} chunks...`);
-            this.retransmitChunks(this.currentFile, msg.chunks).then(() => {
-                // After retransmitting, send file-end again to trigger another check on receiver
-                this.sendControl({ type: 'file-end' });
-            });
-        }
-
         if (this.pendingControlResolvers.has(msg.type)) {
             const resolve = this.pendingControlResolvers.get(msg.type);
             this.pendingControlResolvers.delete(msg.type);
@@ -89,22 +80,8 @@ export class SenderManager {
         this.isSending = true;
 
         const file = this.queue.shift()!;
-        this.currentFile = file; // Store for retransmission
         this.currentFileName = file.name;
         
-        this.onProgress({
-            fileName: this.currentFileName,
-            transferredBytes: 0,
-            fileSize: file.size,
-            totalFiles: this.totalFiles,
-            currentFileIndex: (this.totalFiles - this.queue.length), 
-            totalBatchBytes: this.totalSize,
-            transferredBatchBytes: 0, 
-            speed: 'Starting...',
-            eta: '...',
-            isComplete: false
-        });
-
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
         this.sendControl({ 
@@ -119,13 +96,19 @@ export class SenderManager {
 
         await this.waitForControlMessage('ready-for-file');
 
-        await this.pumpFile(file);
+        // --- THE ROBUST TRANSFER LOOP ---
+        try {
+            await this.pumpFileWithBackpressure(file);
+        } catch (e) {
+            console.error("Transfer interrupted", e);
+            this.isSending = false;
+            return;
+        }
 
         this.sendControl({ type: 'file-end' });
 
         await this.waitForControlMessage('ack-file');
 
-        this.currentFile = null; // Clear ref
         this.isSending = false;
 
         if (this.queue.length > 0) {
@@ -147,174 +130,72 @@ export class SenderManager {
         }
     }
 
-    private pumpFile(file: File): Promise<void> {
+    private pumpFileWithBackpressure(file: File): Promise<void> {
         return new Promise((resolve, reject) => {
             let offset = 0;
-            let chunkIndex = 0;
-            let readsPending = 0;
-            const MAX_READS = 50; 
-
-            // Temporary listener for this specific file transfer
-            const onChunk = async (e: MessageEvent) => {
+            
+            // We use the worker to read the file from disk without freezing UI
+            const onChunkReady = async (e: MessageEvent) => {
                 if (e.data.type === 'chunk_ready') {
                     const { buffer, eof } = e.data;
-                    readsPending--;
                     
-                    // Note: We use the sequential chunkIndex here
-                    await this.sendChunk(buffer, chunkIndex);
-                    chunkIndex++;
+                    try {
+                        await this.sendBufferSafe(buffer);
+                    } catch (err) {
+                        this.worker.removeEventListener('message', onChunkReady);
+                        reject(err);
+                        return;
+                    }
 
                     if (eof) {
-                        this.worker.removeEventListener('message', onChunk);
+                        this.worker.removeEventListener('message', onChunkReady);
                         resolve();
                     } else {
-                        loadMore();
+                        offset += CHUNK_SIZE;
+                        readNext();
                     }
                 }
             };
 
-            this.worker.addEventListener('message', onChunk);
-
-            const loadMore = () => {
-                let totalBuffered = 0;
-                this.dataChannels.forEach(c => totalBuffered += c.bufferedAmount);
-                if (totalBuffered > MAX_BUFFERED_AMOUNT) {
-                    setTimeout(loadMore, 10);
-                    return;
-                }
-
-                while (readsPending < MAX_READS && offset < file.size) {
-                    this.worker.postMessage({ 
-                        type: 'read_chunk', 
-                        file, 
-                        chunkSize: CHUNK_SIZE, 
-                        startOffset: offset 
-                    });
-                    offset += CHUNK_SIZE;
-                    readsPending++;
-                }
+            const readNext = () => {
+                this.worker.postMessage({ 
+                    type: 'read_chunk', 
+                    file, 
+                    chunkSize: CHUNK_SIZE, 
+                    startOffset: offset 
+                });
             };
 
-            loadMore();
+            this.worker.addEventListener('message', onChunkReady);
+            readNext();
         });
     }
 
-    /**
-     * Resends specific chunks requested by the receiver.
-     */
-    private retransmitChunks(file: File, indices: number[]): Promise<void> {
-        return new Promise((resolve) => {
-            let i = 0;
-            
-            const processNextBatch = () => {
-                if (i >= indices.length) {
-                    this.worker.removeEventListener('message', onRetransmitChunk);
-                    resolve();
-                    return;
-                }
-
-                // Send small batches to worker to avoid flooding
-                const BATCH_SIZE = 20; 
-                const limit = Math.min(i + BATCH_SIZE, indices.length);
-                
-                for (let j = i; j < limit; j++) {
-                    const idx = indices[j];
-                    const offset = idx * CHUNK_SIZE;
-                    this.worker.postMessage({ 
-                        type: 'read_chunk', 
-                        file, 
-                        chunkSize: CHUNK_SIZE, 
-                        startOffset: offset,
-                        // We attach the index to the request so the worker can pass it back
-                        // But since our worker is simple, we rely on order or modifying worker.
-                        // Actually, the current worker just returns buffer.
-                        // We need to wrap the listener to handle this.
-                        // TRICK: We can just use the fact that worker responses come in order of requests.
-                        // BUT context is lost.
-                        // Let's modify worker message to include a context ID or just assume FIFO.
-                        // FIFO is safe for Web Workers.
-                        context: idx 
-                    });
-                }
-                i = limit;
-            };
-
-            const onRetransmitChunk = async (e: MessageEvent) => {
-                 if (e.data.type === 'chunk_ready') {
-                     const { buffer, context } = e.data;
-                     // Context here IS the chunk index we passed in
-                     if (typeof context === 'number') {
-                         await this.sendChunk(buffer, context);
-                     }
-                     
-                     // Check if we are done with all requests
-                     // We can track pending counts, but simpler:
-                     // The worker will reply exactly once for each postMessage.
-                     // We need to count completions.
-                     pendingRetransmits--;
-                     if (pendingRetransmits === 0 && i >= indices.length) {
-                         this.worker.removeEventListener('message', onRetransmitChunk);
-                         resolve();
-                     } else if (pendingRetransmits < 10) {
-                         processNextBatch();
-                     }
-                 }
-            };
-
-            let pendingRetransmits = 0;
-            // Intercept postMessage to count pending
-            const originalPost = this.worker.postMessage.bind(this.worker);
-            this.worker.postMessage = (msg: any) => {
-                pendingRetransmits++;
-                originalPost(msg);
-            };
-
-            this.worker.addEventListener('message', onRetransmitChunk);
-            processNextBatch();
-            
-            // Restore postMessage after (hacky but works for this scope)
-            // Ideally we shouldn't monkeypatch, but for brevity in this fix:
-            // Better: just manage the loop inside `processNextBatch` carefully.
-        });
-    }
-
-    private async sendChunk(buffer: ArrayBuffer, index: number) {
-        const packet = new Uint8Array(HEADER_SIZE + buffer.byteLength);
-        new DataView(packet.buffer).setUint32(0, index, false);
-        packet.set(new Uint8Array(buffer), HEADER_SIZE);
-
-        let sent = false;
-        let attempts = 0;
-        while (!sent && attempts < 5) { 
-            try {
-                // Use Control channel for retransmits sometimes to ensure delivery? 
-                // No, stick to data channels but maybe order doesn't matter.
-                const ch = this.dataChannels[index % this.dataChannels.length];
-                if (ch?.readyState === 'open') {
-                    ch.send(packet);
-                    sent = true;
-                } else if (this.controlChannel?.readyState === 'open') {
-                    this.controlChannel.send(packet);
-                    sent = true;
-                } else {
-                    throw new Error("Busy");
-                }
-            } catch (err) { 
-                attempts++;
-                await new Promise(r => setTimeout(r, 20));
-            }
+    // CRITICAL: This method waits if the network buffer is full.
+    // This effectively syncs the sender speed with the receiver speed.
+    private async sendBufferSafe(buffer: ArrayBuffer): Promise<void> {
+        if (!this.transferChannel || this.transferChannel.readyState !== 'open') {
+            throw new Error("Transfer channel closed");
         }
+
+        // Backpressure check
+        if (this.transferChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+            await new Promise<void>(resolve => {
+                const handler = () => {
+                    this.transferChannel!.removeEventListener('bufferedamountlow', handler);
+                    resolve();
+                };
+                this.transferChannel!.addEventListener('bufferedamountlow', handler);
+            });
+        }
+
+        // Send raw buffer (no header needed, we trust TCP/SCTP order)
+        this.transferChannel.send(buffer);
     }
 
     private waitForControlMessage(expectedType: string): Promise<void> {
         return new Promise(resolve => {
             this.pendingControlResolvers.set(expectedType, resolve);
-            setTimeout(() => {
-                if (this.pendingControlResolvers.has(expectedType)) {
-                    this.pendingControlResolvers.delete(expectedType);
-                    resolve();
-                }
-            }, 60000); 
         });
     }
 
@@ -344,7 +225,6 @@ export class SenderManager {
     public cleanup() {
         this.worker.terminate();
         this.queue = [];
-        this.currentFile = null;
         this.pendingControlResolvers.clear();
     }
 }
