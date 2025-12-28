@@ -1,4 +1,4 @@
-import { signalingService } from './mqttSignaling';
+import { signalingService } from './signaling';
 import { ConnectionState, FileMetadata, TransferProgress } from '../types';
 import { deviceService } from './device';
 
@@ -7,10 +7,17 @@ const CHUNK_SIZE = 64 * 1024; // 64KB chunks
 // 16 chunks * 64KB = 1MB. Sender pauses every 1MB to let Receiver catch up.
 const ACK_THRESHOLD = 16; 
 
+// Expanded STUN server list to improve NAT traversal on mobile networks
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }, 
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    // Alternate public STUN providers for redundancy
+    { urls: 'stun:stun.ekiga.net' },
+    { urls: 'stun:stun.ideasip.com' }
   ],
   iceCandidatePoolSize: 10,
   bundlePolicy: 'max-bundle' as RTCBundlePolicy,

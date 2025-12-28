@@ -3,18 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <meta name="description" content="Secure, serverless P2P file transfer directly between devices using WebRTC.">
+    
+    <!-- Optimized SEO Description -->
+    <meta name="description" content="BeamDrop lets you securely send files peer-to-peer with end-to-end encryption. No servers, no limits. Share instantly using a simple code, directly between devices.">
+    
     <title>BeamDrop</title>
     <meta name="theme-color" content="#000000" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    
-    <!-- Preconnect to Signaling Broker to speed up initial connection -->
-    <link rel="preconnect" href="https://broker.hivemq.com" crossorigin />
-    <link rel="dns-prefetch" href="https://broker.hivemq.com" />
 
+    <!-- Favicons: SVG + PNG for better Google Indexing -->
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
-    <link rel="apple-touch-icon" href="/icon.svg" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    
     <style>
       /* Critical CSS for initial load spinner */
       body { background-color: #000; margin: 0; padding: 0; }
@@ -36,7 +38,7 @@
       }
       @keyframes spin { to { transform: rotate(360deg); } }
       
-      /* Fail-safe error button styles (hidden by default) */
+      /* Fail-safe error button styles */
       #loader-error {
         display: none;
         position: fixed;
@@ -69,13 +71,20 @@
     "lucide-react": "https://esm.sh/lucide-react@^0.562.0",
     "vite": "https://esm.sh/vite@^7.3.0",
     "jszip": "https://esm.sh/jszip@^3.10.1",
-    "vite-plugin-pwa": "https://esm.sh/vite-plugin-pwa@^1.2.0",
-    "mqtt": "https://esm.sh/mqtt@^5.14.1"
+    "vite-plugin-pwa": "https://esm.sh/vite-plugin-pwa@^1.2.0"
   }
 }
 </script>
 </head>
   <body class="bg-black text-white h-[100dvh] antialiased selection:bg-white selection:text-black overflow-hidden">
+    
+    <!-- Semantic Content for SEO (Visually Hidden) -->
+    <!-- This ensures Google indexes the correct description instead of UI buttons -->
+    <header style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">
+      <h1>BeamDrop</h1>
+      <p>Secure peer-to-peer file transfer with no servers and no limits.</p>
+    </header>
+
     <div id="root"></div>
     
     <!-- Fail Safe UI -->
@@ -86,28 +95,23 @@
 
     <script type="module" src="/index.tsx"></script>
     
-    <!-- Fail Safe Script: Runs if React fails to mount in 4 seconds -->
+    <!-- Fail Safe Script -->
     <script>
       setTimeout(() => {
         const root = document.getElementById('root');
-        // If root is still empty (React hasn't mounted)
         if (root && !root.hasChildNodes()) {
-          // Hide the spinner CSS
           root.style.display = 'none';
-          // Show error button
           document.getElementById('loader-error').style.display = 'block';
         }
       }, 4000);
 
       async function hardReload() {
-        // 1. Unregister all service workers
         if ('serviceWorker' in navigator) {
           const registrations = await navigator.serviceWorker.getRegistrations();
           for (let registration of registrations) {
             await registration.unregister();
           }
         }
-        // 2. Force reload from server (ignoring cache)
         window.location.reload();
       }
     </script>

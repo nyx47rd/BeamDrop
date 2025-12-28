@@ -7,7 +7,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['icon.svg'],
+      includeAssets: ['icon.svg', 'favicon.png', 'apple-touch-icon.png'],
       workbox: {
         cleanupOutdatedCaches: true,
         clientsClaim: true,
@@ -30,6 +30,16 @@ export default defineConfig({
             sizes: 'any',
             type: 'image/svg+xml',
             purpose: 'any maskable'
+          },
+          {
+            src: 'favicon.png',
+            sizes: '192x192',
+            type: 'image/png'
+          },
+          {
+            src: 'favicon.png', // Ideally this should be a larger 512px image
+            sizes: '512x512',
+            type: 'image/png'
           }
         ]
       }
@@ -37,28 +47,22 @@ export default defineConfig({
   ],
   build: {
     outDir: 'dist',
-    target: 'esnext', // Reduces bundle size by removing legacy polyfills
-    minify: 'esbuild', // Faster and efficient
+    target: 'esnext',
+    minify: 'esbuild',
     cssMinify: true,
-    reportCompressedSize: false, // Speeds up build
+    reportCompressedSize: false,
     rollupOptions: {
       output: {
         manualChunks(id) {
-          // React Core (High Priority, Cached often)
           if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) {
             return 'vendor-react';
           }
-          // UI Libs (Medium Priority)
           if (id.includes('node_modules/lucide-react')) {
             return 'vendor-ui';
           }
-          // Utilities
           if (id.includes('node_modules/jszip')) {
             return 'vendor-utils';
           }
-          // IMPORTANT: 'mqtt' is purposefully EXCLUDED here.
-          // Since it is dynamically imported in the code, excluding it lets Vite
-          // create a separate async chunk that is ONLY loaded when connecting.
         }
       }
     }

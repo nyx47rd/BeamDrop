@@ -1,11 +1,53 @@
 import React from 'react';
-import { Send, Download, Zap, Shield, Globe } from 'lucide-react';
+import { Send, Download, Zap, Shield, Globe, Wrench } from 'lucide-react';
 
 interface Props {
   onSelectRole: (role: 'sender' | 'receiver') => void;
 }
 
 export const WelcomeScreen: React.FC<Props> = ({ onSelectRole }) => {
+
+  // HELPER: Generates a 512x512 PNG with Black Background + White Icon
+  const generateAssets = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 512;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // 1. Draw Black Background (App Theme)
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, 512, 512);
+
+    // 2. Prepare SVG Image
+    const img = new Image();
+    const svgData = `
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white">
+        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+      </svg>
+    `;
+    const blob = new Blob([svgData], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+
+    img.onload = () => {
+      // 3. Draw Icon Centered (Scale: 24px -> ~300px)
+      // Save context, translate to center, scale, draw centered
+      ctx.translate(256, 256);
+      ctx.scale(15, 15); // Scale up 15x
+      ctx.translate(-12, -12); // Offset by half of viewBox (24/2)
+      ctx.drawImage(img, 0, 0);
+
+      // 4. Download
+      const link = document.createElement('a');
+      link.download = 'beamdrop-icon.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+      
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  };
+
   return (
     <div className="flex flex-col items-center w-full max-w-md animate-in fade-in slide-in-from-bottom-8 duration-700">
       
@@ -47,7 +89,7 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole }) => {
       </div>
 
       {/* Features / Footer */}
-      <div className="flex justify-center gap-6 text-neutral-500 text-xs font-medium uppercase tracking-wider">
+      <div className="flex justify-center gap-6 text-neutral-500 text-xs font-medium uppercase tracking-wider mb-8">
         <div className="flex items-center gap-2">
           <Shield className="w-4 h-4" aria-hidden="true" />
           <span>Encrypted</span>
@@ -57,6 +99,16 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole }) => {
           <span>P2P Direct</span>
         </div>
       </div>
+
+      {/* Temporary Developer Tool for PNG Generation */}
+      <button 
+        onClick={generateAssets}
+        className="text-[10px] text-neutral-700 flex items-center gap-1 hover:text-white transition-colors border border-white/5 px-2 py-1 rounded bg-white/5"
+      >
+        <Wrench className="w-3 h-3" />
+        Dev: Generate PNG Assets
+      </button>
+
     </div>
   );
 };

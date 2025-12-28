@@ -6,7 +6,7 @@
 ![Vite](https://img.shields.io/badge/Vite-5.0-646cff?logo=vite&logoColor=white)
 ![TailwindCSS](https://img.shields.io/badge/Tailwind-3.4-38bdf8?logo=tailwindcss&logoColor=white)
 ![WebRTC](https://img.shields.io/badge/Protocol-WebRTC-333333?logo=webrtc&logoColor=white)
-![PWA](https://img.shields.io/badge/PWA-Ready-purple?logo=pwa&logoColor=white)
+![Cloudflare](https://img.shields.io/badge/Serverless-Cloudflare%20Workers-orange?logo=cloudflare&logoColor=white)
 
 **BeamDrop** is a modern, secure, and serverless peer-to-peer file transfer application. It establishes a direct connection between devices using **WebRTC**, allowing for unlimited file sharing without intermediate storage servers.
 
@@ -19,31 +19,32 @@ It solves the problem of "How do I get this file from my phone to my laptop (or 
 - **PWA Support:** Installable on mobile and desktop. Works as a standalone app with offline shell support.
 - **Easy Pairing:** Uses a simple 6-digit numeric code to handshake (no QR codes required).
 - **Cross-Platform:** Works on any modern browser (iOS, Android, Windows, Mac, Linux).
-- **Modern UI:** Dark mode aesthetic with a clean black & white theme.
+- **Modern UI:** Apple-esque dark mode aesthetic with a clean black & white theme.
 - **Secure:** End-to-end encryption provided natively by WebRTC `RTCDataChannel`.
-- **Network Traversal:** Uses public STUN servers to punch through NATs.
+- **Serverless Signaling:** Uses a custom Cloudflare Worker with Durable Objects for instant, low-latency signaling.
 
 ## 📱 Progressive Web App (PWA)
 
 BeamDrop is fully PWA compliant:
-- **Installable:** Add to Home Screen on iOS, Android, Mac, Windows, Linux and all other platforms for a native app experience.
+- **Installable:** Add to Home Screen on iOS and Android for a native app experience.
+- **Themed:** Custom black background icon and splash screen.
 - **Offline Ready:** App shell loads instantly even on spotty connections.
 
 ##  Architecture & How It Works
 
 BeamDrop utilizes a "Signaling" concept to establish a connection, after which the signaling channel is no longer needed for data transfer.
 
-1.  **Signaling (MQTT):**
-    - We use `mqtt` over WebSockets (connecting to a public HiveMQ broker for this demo) as a signaling server.
+1.  **Signaling (Cloudflare Workers):**
+    - We use a **Cloudflare Worker** + **Durable Objects** as a signaling server.
     - **Sender** generates a random 6-digit Channel ID.
-    - **Receiver** subscribes to that Channel ID.
-    - SDP Offers, Answers, and ICE Candidates are exchanged via this MQTT topic.
-    - *New:* connection logs are displayed to the user to indicate the current stage of the handshake (Signaling -> ICE Checking -> Connected).
+    - **Receiver** connects to the Worker using that ID.
+    - The Durable Object acts as a temporary "room", broadcasting SDP Offers, Answers, and ICE Candidates to connected peers via WebSockets.
+    - This replaces the older MQTT implementation for better control and lower latency.
 
 2.  **Direct Transport (WebRTC):**
     - Once signaling is complete, a standard `RTCPeerConnection` is established.
     - An `RTCDataChannel` is opened for binary transfer.
-    - Files are chunked (16KB chunks) and streamed to prevent memory overflow, managing backpressure via `bufferedAmount`.
+    - Files are chunked (64KB chunks) and streamed to prevent memory overflow, managing backpressure via `bufferedAmount`.
 
 ## 🚀 Getting Started
 
@@ -51,6 +52,7 @@ BeamDrop utilizes a "Signaling" concept to establish a connection, after which t
 
 - Node.js (v18 or higher)
 - npm or yarn
+- Cloudflare Account (for deploying the signaling worker)
 
 ### Installation
 
@@ -73,14 +75,13 @@ BeamDrop utilizes a "Signaling" concept to establish a connection, after which t
 4.  **Open in Browser**
     Visit `http://localhost:5173`
 
-### Testing on Local Network (Mobile to Desktop)
-To test P2P between your phone and computer, they must be able to reach the dev server.
-```bash
-npm run dev -- --host
-```
-Then access the local IP address (e.g., `http://192.168.1.50:5173`) on your phone.
-
-> **Note:** For WebRTC to work over the internet (non-local), you might need a HTTPS connection in production or localhost context. Most browsers require a secure context for camera/mic/WebRTC APIs, though basic DataChannels often work on HTTP for localhost.
+### Deploying the Signaling Server
+BeamDrop requires a signaling server to exchange connection details.
+1. Create a Cloudflare Worker: `npm create cloudflare@latest beamdrop-signaling`
+2. Select "Hello World" > "Worker + Durable Objects".
+3. Replace the worker code with the provided `src/index.js` content.
+4. Deploy: `npx wrangler deploy`.
+5. Update `services/signaling.ts` in the frontend with your new Worker URL.
 
 ## 🛠 Tech Stack
 
@@ -89,12 +90,11 @@ Then access the local IP address (e.g., `http://192.168.1.50:5173`) on your phon
 - **Styling:** [TailwindCSS](https://tailwindcss.com/)
 - **Icons:** [Lucide React](https://lucide.dev/)
 - **P2P Protocol:** Native WebRTC API (`RTCPeerConnection`, `RTCDataChannel`)
-- **Signaling Transport:** MQTT (via `mqtt.js`)
+- **Signaling:** Cloudflare Workers (WebSockets + Durable Objects)
 
-## ⚠️ Limitations
+## ⚠️ Limitations (v1.0)
 
-- **NAT Traversal:** Currently uses Google's public STUN servers. If both users are behind strict Symmetric NATs (e.g., some corporate firewalls or 4G networks), connection might fail without a TURN server.
-- **Signaling:** Uses a public MQTT broker. For a production app, you should host your own Mosquitto or WebSocket server to ensure signaling privacy and uptime.
+- **NAT Traversal:** Currently uses public STUN servers. If both users are behind strict Symmetric NATs (e.g., some corporate firewalls or specific 4G networks), connection might fail without a TURN server.
 
 ## 🤝 Contributing
 
