@@ -3,13 +3,13 @@ import { signalingService } from './signaling';
 import { ConnectionState, FileMetadata, TransferProgress, BatchMetadata } from '../types';
 import { deviceService } from './device';
 
-// --- PERFORMANCE TUNING ---
-const CHUNK_SIZE = 64 * 1024; // 64KB standard chunk
-const MAX_BUFFERED_AMOUNT = 1024 * 1024; // 1MB Backpressure limit
-const MAX_QUEUE_SIZE = 4; // Max chunks in memory per channel
-const ACK_TIMEOUT_MS = 5000; // Force continue if receiver doesn't ack
+// --- PERFORMANCE TUNING (Aggressive Mode) ---
+const CHUNK_SIZE = 256 * 1024; // Increased to 256KB for higher throughput
+const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024; // Increased to 16MB to saturate bandwidth
+const MAX_QUEUE_SIZE = 8; // Increased queue depth
+const ACK_TIMEOUT_MS = 5000; 
 
-// UPDATED: Process 3 files concurrently
+// Process 3 files concurrently
 const CONCURRENT_CHANNELS = 3;
 
 const createWorker = () => new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
@@ -18,6 +18,7 @@ class TransferChannel {
     public id: number;
     public channel: RTCDataChannel;
     private manager: P2PManager;
+    private worker: Worker; // Reuse worker
     
     // State
     private isBusy = false;
@@ -36,12 +37,14 @@ class TransferChannel {
         this.id = id;
         this.channel = channel;
         this.manager = manager;
+        // Init worker once per channel to avoid startup latency
+        this.worker = createWorker();
         this.setupEvents();
     }
 
     private setupEvents() {
         this.channel.binaryType = 'arraybuffer';
-        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE;
+        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE * 2; // Trigger pump earlier
 
         this.channel.onopen = () => {
             console.log(`[Channel ${this.id}] Open`);
@@ -49,7 +52,10 @@ class TransferChannel {
             this.processQueue();
         };
 
-        this.channel.onclose = () => console.log(`[Channel ${this.id}] Closed`);
+        this.channel.onclose = () => {
+            console.log(`[Channel ${this.id}] Closed`);
+            this.cleanup();
+        };
         this.channel.onmessage = (event) => this.handleMessage(event);
     }
 
@@ -76,7 +82,8 @@ class TransferChannel {
         } finally {
             this.isBusy = false;
             this.currentFile = null;
-            setTimeout(() => this.processQueue(), 10);
+            // Immediate recursive call instead of setTimeout for tighter loop
+            this.processQueue(); 
         }
     }
 
@@ -87,20 +94,16 @@ class TransferChannel {
             type: file.type,
         };
 
-        // 1. UPDATE UI: Tell manager we are working on this file (SENDER SIDE)
         this.manager.notifyFileStart(file.name);
-        
-        // 2. Send Start Marker
         this.channel.send(JSON.stringify({ type: 'file-start', metadata }));
 
         return new Promise<void>((resolve, reject) => {
-            const worker = createWorker();
             let fileOffset = 0;
             this.pendingReadRequests = 0;
+            const worker = this.worker; // Use class instance worker
 
             const pump = () => {
                 if (this.channel.readyState !== 'open') {
-                    worker.terminate();
                     reject(new Error("Channel closed"));
                     return;
                 }
@@ -130,9 +133,10 @@ class TransferChannel {
 
             this.channel.onbufferedamountlow = () => pump();
 
-            worker.onmessage = async (e) => {
+            // Set up one-time listener for this file transfer
+            const messageHandler = async (e: MessageEvent) => {
                 if (e.data.type === 'error') {
-                    worker.terminate();
+                    worker.removeEventListener('message', messageHandler);
                     reject(e.data.error);
                     return;
                 }
@@ -146,27 +150,26 @@ class TransferChannel {
                         this.manager.updateProgress(buffer.byteLength);
 
                         if (eof) {
-                            worker.terminate();
+                            worker.removeEventListener('message', messageHandler);
                             this.channel.onbufferedamountlow = null;
                             
                             await this.waitForDrain();
                             this.channel.send(JSON.stringify({ type: 'file-end' }));
                             await this.waitForAckOrTimeout();
                             
-                            // 3. UPDATE UI: Tell manager file is done (SENDER SIDE)
                             this.manager.markSenderFileComplete();
-                            
                             resolve();
                         } else {
                             pump();
                         }
                     } catch (err) {
-                        worker.terminate();
+                        worker.removeEventListener('message', messageHandler);
                         reject(err);
                     }
                 }
             };
 
+            worker.addEventListener('message', messageHandler);
             pump();
         });
     }
@@ -179,7 +182,7 @@ class TransferChannel {
                     clearInterval(check);
                     resolve();
                 }
-            }, 50);
+            }, 10); // Faster check interval
         });
     }
 
@@ -232,7 +235,6 @@ class TransferChannel {
             this.currentMeta = msg.metadata;
             this.receivedBuffers = [];
             this.receivedSize = 0;
-            // Receiver Side UI Update
             this.manager.notifyFileStart(msg.metadata.name);
         }
         else if (msg.type === 'file-end') {
@@ -262,6 +264,7 @@ class TransferChannel {
 
     public cleanup() {
         if (this.channel) this.channel.close();
+        if (this.worker) this.worker.terminate();
         this.receivedBuffers = [];
         this.fileQueue = [];
     }
@@ -386,6 +389,11 @@ export class P2PManager {
       // If we are done, force total transferred bytes to equal total size (fix floating point issues)
       if (this.batchState.completedFilesCount === this.batchState.totalFiles) {
           this.batchState.transferredBytes = this.batchState.totalSize;
+          // NOTIFICATION FIX: Only send notification when ALL files are done
+          const msg = this.batchState.totalFiles === 1 
+            ? "File Sent Successfully" 
+            : `All ${this.batchState.totalFiles} Files Sent`;
+          deviceService.sendNotification('Transfer Complete', msg);
       }
       this.emitProgress();
   }
@@ -397,6 +405,7 @@ export class P2PManager {
           this.fileReceivedCallback(blob, meta);
       }
       if (this.batchState.completedFilesCount >= this.batchState.totalFiles) {
+          // NOTIFICATION FIX: Only send notification when ALL files are done
           deviceService.sendNotification('Transfer Complete', `All ${this.batchState.totalFiles} files received`);
       }
       this.emitProgress();

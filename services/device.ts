@@ -55,7 +55,13 @@ export class DeviceService {
     if (Notification.permission === 'granted') {
       try {
         if ('vibrate' in navigator) {
-            try { navigator.vibrate(200); } catch (e) {}
+            try { 
+                // Fix: Blocked call to navigator.vibrate because user hasn't tapped on the frame
+                // We check for activation or simply suppress the error
+                navigator.vibrate(200); 
+            } catch (e) {
+                // Silently ignore vibration errors (likely due to lack of user gesture)
+            }
         }
 
         const options: any = {

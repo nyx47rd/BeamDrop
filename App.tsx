@@ -195,11 +195,8 @@ const App: React.FC = () => {
       // Use the batch processing method
       await p2pManager.sendFiles(files);
       
-      if (files.length === 1) {
-        deviceService.sendNotification('Transfer Complete', `File ${files[0].name} sent`);
-      } else if (files.length > 1) {
-        deviceService.sendNotification('Transfer Complete', `${files.length} files sent`);
-      }
+      // Removed premature notification call here. 
+      // P2PManager now handles the notification when transfer is actually complete.
 
     } catch (e) {
       console.error(e);
