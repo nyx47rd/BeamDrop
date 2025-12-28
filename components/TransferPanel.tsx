@@ -30,8 +30,8 @@ const formatBytes = (bytes: number, decimals = 2) => {
 const ProgressBar = memo(({ progress }: { progress: TransferProgress | null }) => {
   if (!progress) return null;
   
-  // Calculate percentage based on TOTAL batch size, not individual file
-  const percent = Math.min(100, (progress.transferredBatchBytes / progress.totalBatchBytes) * 100);
+  // Calculate percentage based on TOTAL batch size
+  const percent = Math.min(100, (progress.transferredBatchBytes / Math.max(progress.totalBatchBytes, 1)) * 100);
   
   return (
     <div role="status" className="w-full shrink-0 bg-[#1c1c1e] rounded-[2rem] p-6 mb-6 border border-white/5 shadow-lg relative overflow-hidden group">
@@ -43,11 +43,12 @@ const ProgressBar = memo(({ progress }: { progress: TransferProgress | null }) =
             <div className="flex items-center gap-2">
                 <FileStack className="w-4 h-4 text-white" />
                 <span className="text-lg font-bold text-white tracking-tight">
-                    File {progress.currentFileIndex} <span className="text-neutral-500 text-base font-normal">of {progress.totalFiles}</span>
+                    {/* Fixed Logic: Ensure index never exceeds total */}
+                    Files {Math.min(progress.currentFileIndex, progress.totalFiles)} <span className="text-neutral-500 text-base font-normal">of {progress.totalFiles}</span>
                 </span>
             </div>
             <span className="text-xs text-neutral-400 truncate max-w-[200px]">
-                Current: <span className="text-white">{progress.fileName}</span>
+                Active: <span className="text-white">{progress.fileName}</span>
             </span>
         </div>
         <div className="flex flex-col items-end">
@@ -149,21 +150,22 @@ export const TransferPanel: React.FC<Props> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   
-  // Auto-scroll logic (Receiver only)
+  // Auto-scroll logic (Receiver only) - Safe Check Added
   useEffect(() => {
     if (role === 'receiver' && listRef.current) {
       requestAnimationFrame(() => {
           if (listRef.current) {
-            listRef.current.scrollTo({
-                top: listRef.current.scrollHeight,
-                behavior: 'smooth'
-            });
+            try {
+                listRef.current.scrollTo({
+                    top: listRef.current.scrollHeight,
+                    behavior: 'smooth'
+                });
+            } catch(e) {}
           }
       });
     }
   }, [receivedFiles.length, role]);
 
-  // Ensure wake lock is active on mount or interaction
   useEffect(() => {
       deviceService.enableWakeLock();
       const enableOnInteraction = () => {
