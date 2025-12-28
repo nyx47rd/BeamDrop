@@ -2,7 +2,7 @@
 /// <reference lib="webworker" />
 
 self.onmessage = async (e: MessageEvent) => {
-  const { type, file, chunkSize, startOffset } = e.data;
+  const { type, file, chunkSize, startOffset, context } = e.data;
 
   if (type === 'init') {
     // Worker initialized
@@ -23,7 +23,8 @@ self.onmessage = async (e: MessageEvent) => {
           type: 'chunk_ready', 
           buffer: arrayBuffer, 
           offset: end, 
-          eof: end >= file.size 
+          eof: end >= file.size,
+          context: context // Pass back context (e.g. chunk index) if provided
         }, 
         [arrayBuffer]
       );

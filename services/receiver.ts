@@ -18,8 +18,8 @@ class ChunkStore {
     private writeQueue: { index: number, data: ArrayBuffer }[] = []; 
     private fileType: string;
     
-    // Track unique chunks explicitly
-    private _count: number = 0;
+    // Track unique chunks for integrity AND retransmission logic
+    private receivedIndices: Set<number> = new Set();
 
     constructor(fileSize: number, fileType: string) {
         this.fileType = fileType;
@@ -35,32 +35,37 @@ class ChunkStore {
         }
     }
 
-    // Returns true if this was a new chunk, false if duplicate
     async add(index: number, data: ArrayBuffer): Promise<boolean> {
-        let isNew = false;
-        
+        if (this.receivedIndices.has(index)) return false; // Deduplicate immediately
+
+        this.receivedIndices.add(index);
+
         if (this.useDB && this.db) {
-            // For DB, we just assume it's new for performance in the heat of transfer
-            // or we could check existence, but 'put' overwrites.
-            // We rely on memory counter for integrity check logic.
-            // A simple dedupe set for indices would be safer for the counter.
             this.writeQueue.push({ index, data });
             if (this.writeQueue.length >= IDB_BATCH_SIZE) await this.flush();
-            // We increment tentatively, final integrity check is what matters
-            this._count++; 
-            isNew = true; 
         } else {
-            if (!this.ramChunks.has(index)) {
-                this.ramChunks.set(index, data);
-                this._count++;
-                isNew = true;
-            }
+            this.ramChunks.set(index, data);
         }
-        return isNew;
+        return true;
     }
 
     get count(): number {
-        return this._count;
+        return this.receivedIndices.size;
+    }
+
+    // New: Calculate exactly which chunks are missing
+    getMissingIndices(totalExpected: number): number[] {
+        const missing: number[] = [];
+        // Iterate only up to totalExpected. 
+        // For very large files, this loop is still fast (1GB = ~16k chunks).
+        for (let i = 0; i < totalExpected; i++) {
+            if (!this.receivedIndices.has(i)) {
+                missing.push(i);
+                // Cap the request to avoid exploding the control channel
+                if (missing.length >= 500) break; 
+            }
+        }
+        return missing;
     }
 
     async flush() {
@@ -76,7 +81,6 @@ class ChunkStore {
         if (this.useDB && this.db) {
             await this.flush();
             const tx = this.db.transaction('chunks', 'readonly');
-            // We trust the DB to sort by key (index) automatically
             const allChunks = await tx.objectStore('chunks').getAll();
             this.db.close();
             await window.indexedDB.deleteDatabase(this.dbName!);
@@ -110,6 +114,7 @@ export class ReceiverManager {
     // Integrity Flags
     private hasReceivedFileEnd = false;
     private totalExpectedChunks = 0;
+    private retransmitTimeout: any = null;
 
     constructor(
         onProgress: (p: TransferProgress) => void,
@@ -137,30 +142,28 @@ export class ReceiverManager {
             await this.chunkStore.add(index, chunk);
             this.handleBytesReceived(byteLength);
             
-            // CHECK INTEGRITY: If we were waiting for late chunks, this might finish it
-            this.checkAndFinalizeFile();
+            // If we are in "Waiting for missing chunks" mode, check if we are done now
+            if (this.hasReceivedFileEnd) {
+                this.checkAndFinalizeFile();
+            }
             return;
         }
 
         // 2. CONTROL MESSAGES
         if (!isBinary) {
-            // STEP 1: Batch Offer
             if (data.type === 'offer-batch') {
-                console.log("Receiver: Got Batch Offer", data.meta);
                 this.totalFilesCount = data.meta.totalFiles;
                 this.completedFilesCount = 0;
                 this.monitor.reset(data.meta.totalSize);
                 this.sendControl({ type: 'accept-batch' });
             }
-            // STEP 2: File Start
             else if (data.type === 'file-start') {
-                console.log("Receiver: Got File Start", data.meta);
                 this.currentMeta = data.meta;
                 this.currentFileName = data.meta.name;
                 
-                // Integrity Init
                 this.totalExpectedChunks = data.meta.totalChunks;
                 this.hasReceivedFileEnd = false;
+                if (this.retransmitTimeout) clearTimeout(this.retransmitTimeout);
                 
                 this.chunkStore = new ChunkStore(data.meta.size, data.meta.type);
                 await this.chunkStore.init();
@@ -168,33 +171,27 @@ export class ReceiverManager {
                 this.emitProgress();
                 this.sendControl({ type: 'ready-for-file' });
             }
-            // STEP 3: File End
             else if (data.type === 'file-end') {
                 console.log("Receiver: Got File End Signal");
                 this.hasReceivedFileEnd = true;
-                // We do NOT finish immediately. We check if we actually have all chunks.
                 this.checkAndFinalizeFile();
             }
         }
     }
 
-    /**
-     * The heart of the corruption fix.
-     * Only finishes if we have the End Signal AND all Chunks.
-     */
     private async checkAndFinalizeFile() {
         if (!this.chunkStore || !this.currentMeta) return;
 
-        // Condition 1: Sender said they are done.
-        // Condition 2: We actually have X unique chunks.
+        // Success Case
         if (this.hasReceivedFileEnd && this.chunkStore.count >= this.totalExpectedChunks) {
+            if (this.retransmitTimeout) clearTimeout(this.retransmitTimeout);
             console.log(`Receiver: Integrity Check Passed (${this.chunkStore.count}/${this.totalExpectedChunks}). Finalizing.`);
             
             const blob = await this.chunkStore.finish();
             this.onFileReceived(blob, this.currentMeta);
             
             this.completedFilesCount++;
-            this.emitProgress(); // 100%
+            this.emitProgress(); 
 
             this.sendControl({ type: 'ack-file' });
             
@@ -202,13 +199,33 @@ export class ReceiverManager {
                  deviceService.sendNotification('Files Received', `All ${this.totalFilesCount} files received.`);
             }
 
-            // Cleanup for next file
             this.chunkStore = null;
             this.currentMeta = null;
             this.hasReceivedFileEnd = false;
             this.totalExpectedChunks = 0;
-        } else if (this.hasReceivedFileEnd) {
-            console.log(`Receiver: Waiting for missing chunks... (${this.chunkStore.count}/${this.totalExpectedChunks})`);
+        } 
+        // Failure/Missing Data Case
+        else if (this.hasReceivedFileEnd) {
+            // Debounce retransmission requests (don't spam every ms)
+            if (this.retransmitTimeout) return;
+
+            const missingIndices = this.chunkStore.getMissingIndices(this.totalExpectedChunks);
+            
+            if (missingIndices.length > 0) {
+                console.warn(`Receiver: Missing ${missingIndices.length} chunks. Requesting retransmission...`);
+                
+                this.sendControl({ 
+                    type: 'request-retransmit', 
+                    chunks: missingIndices 
+                });
+
+                // Set a timer to allow retry if the retransmission packets also get lost
+                this.retransmitTimeout = setTimeout(() => {
+                    this.retransmitTimeout = null;
+                    // Trigger check again to see if we still need stuff
+                    this.checkAndFinalizeFile(); 
+                }, 1000); // Check again in 1 second
+            }
         }
     }
 
@@ -255,6 +272,7 @@ export class ReceiverManager {
     }
 
     public cleanup() {
+        if (this.retransmitTimeout) clearTimeout(this.retransmitTimeout);
         this.chunkStore = null;
     }
 }
