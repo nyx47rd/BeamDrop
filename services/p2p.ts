@@ -324,71 +324,106 @@ export class P2PManager {
   }
 
   /**
-   * HIGH PERFORMANCE SEND FUNCTION (Backpressure)
-   * Uses bufferedAmount to fill the pipe without overwhelming the network or memory.
-   * No application-layer ACKs during transfer.
+   * HIGH PERFORMANCE SEND FUNCTION (Worker-Based Multiprocessing)
+   * Offloads file reading and slicing to a Web Worker.
+   * Uses Zero-Copy transfers between Worker and Main Thread.
+   * Manages backpressure to keep the DataChannel healthy.
    */
   public async sendFile(file: File): Promise<void> {
     if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
         throw new Error("Connection not open");
     }
 
+    // 1. Send Metadata
     const metadata: FileMetadata = {
         name: file.name,
         size: file.size,
         type: file.type,
     };
-    
-    // 1. Send Metadata
     this.dataChannel.send(JSON.stringify({ type: 'file-start', metadata }));
     
     this.startTime = Date.now();
     this.lastProgressEmit = 0;
-    let offset = 0;
 
-    // 2. Read & Send Loop (Backpressure optimized)
-    while (offset < file.size) {
-        if (this.dataChannel.readyState !== 'open') throw new Error("Connection lost");
-
-        // A. Check Buffer Pressure
-        // If the outbound buffer is full (16MB), wait until it drains to 0 (or low threshold)
-        if (this.dataChannel.bufferedAmount > MAX_BUFFER_THRESHOLD) {
-            await new Promise<void>(resolve => {
-                if (!this.dataChannel) return resolve();
-                const handler = () => {
-                    this.dataChannel!.removeEventListener('bufferedamountlow', handler);
-                    resolve();
-                };
-                this.dataChannel.addEventListener('bufferedamountlow', handler);
-            });
-        }
-
-        // B. Read Chunk
-        const chunkBlob = file.slice(offset, offset + CHUNK_SIZE);
-        const chunkBuffer = await chunkBlob.arrayBuffer();
-
-        // C. Send Chunk
-        try {
-            this.dataChannel.send(chunkBuffer);
-        } catch (e) {
-            console.error("Send failed", e);
-            throw e;
-        }
-
-        offset += chunkBuffer.byteLength;
-        this.throttledReportProgress(offset, file.size, file.name);
-    }
-
-    // 3. End Signal & Wait for Confirmation
-    this.dataChannel.send(JSON.stringify({ type: 'file-end' }));
+    // 2. Initialize Worker for "Multiprocessing"
+    const worker = new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
     
-    // Wait for the receiver to say "I have written the file"
-    await new Promise<void>((resolve) => {
-        this.finalAckResolver = resolve;
-        setTimeout(() => resolve(), 30000); // 30s timeout safety
-    });
+    // We keep track of offset manually in the orchestration logic or let worker handle it.
+    // Here we use an event-driven loop controlled by backpressure.
+    let currentOffset = 0;
+    
+    return new Promise<void>((resolve, reject) => {
+        worker.onmessage = async (e) => {
+            if (e.data.type === 'error') {
+                worker.terminate();
+                reject(e.data.error);
+                return;
+            }
 
-    this.reportProgress(file.size, file.size, file.name);
+            if (e.data.type === 'chunk_ready') {
+                const { buffer, offset, eof } = e.data;
+                currentOffset = offset;
+
+                try {
+                    // Check Backpressure BEFORE sending
+                    // If buffer is full, wait for 'bufferedamountlow' event
+                    if (this.dataChannel && this.dataChannel.bufferedAmount > MAX_BUFFER_THRESHOLD) {
+                        await new Promise<void>(resolveDrain => {
+                            if (!this.dataChannel) return resolveDrain();
+                            const handler = () => {
+                                this.dataChannel?.removeEventListener('bufferedamountlow', handler);
+                                resolveDrain();
+                            };
+                            this.dataChannel.addEventListener('bufferedamountlow', handler);
+                        });
+                    }
+
+                    // Send via WebRTC
+                    if (this.dataChannel?.readyState === 'open') {
+                        this.dataChannel.send(buffer);
+                        this.throttledReportProgress(currentOffset, file.size, file.name);
+                    } else {
+                        throw new Error("Connection lost during transfer");
+                    }
+
+                    if (eof) {
+                        // Done sending file content
+                        finish();
+                    } else {
+                        // Request next chunk
+                        worker.postMessage({ type: 'read_chunk', file, chunkSize: CHUNK_SIZE, startOffset: currentOffset });
+                    }
+
+                } catch (error) {
+                    worker.terminate();
+                    reject(error);
+                }
+            }
+        };
+
+        const finish = async () => {
+            worker.terminate();
+            
+            // 3. End Signal & Wait for Confirmation
+            try {
+                this.dataChannel?.send(JSON.stringify({ type: 'file-end' }));
+                
+                // Wait for the receiver to say "I have written the file"
+                await new Promise<void>((resolveAck) => {
+                    this.finalAckResolver = resolveAck;
+                    setTimeout(() => resolveAck(), 30000); // 30s timeout safety
+                });
+
+                this.reportProgress(file.size, file.size, file.name);
+                resolve();
+            } catch (e) {
+                reject(e);
+            }
+        };
+
+        // Start the loop
+        worker.postMessage({ type: 'read_chunk', file, chunkSize: CHUNK_SIZE, startOffset: 0 });
+    });
   }
 
   private reportProgress(current: number, total: number, name: string) {
