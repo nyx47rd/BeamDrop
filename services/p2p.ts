@@ -1,13 +1,13 @@
 
 import { signalingService } from './signaling';
-import { ConnectionState, FileMetadata, TransferProgress } from '../types';
+import { ConnectionState, FileMetadata, TransferProgress, BatchMetadata } from '../types';
 import { deviceService } from './device';
 
 // Constants for Tuning Performance
 const CHUNK_SIZE = 64 * 1024; // 64KB chunks (Sweet spot for WebRTC SCTP)
-const MAX_BUFFER_THRESHOLD = 16 * 1024 * 1024; // 16MB Buffer Limit (Keeps pipe full without crashing browser)
+const MAX_BUFFER_THRESHOLD = 16 * 1024 * 1024; // 16MB Buffer Limit
 
-// Expanded STUN server list to improve NAT traversal on mobile networks
+// Expanded STUN server list
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -15,7 +15,6 @@ const ICE_SERVERS = {
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
-    // Alternate public STUN providers for redundancy
     { urls: 'stun:stun.ekiga.net' },
     { urls: 'stun:stun.ideasip.com' }
   ],
@@ -39,11 +38,20 @@ export class P2PManager {
   private remotePeerId: string | null = null;
   private iceCandidateQueue: RTCIceCandidateInit[] = [];
 
+  // Batch State (Shared for Sender & Receiver)
+  private batchState = {
+    active: false,
+    totalFiles: 0,
+    totalSize: 0,
+    processedFiles: 0,
+    processedBytes: 0, // Total bytes processed in previous files of this batch
+    startTime: 0
+  };
+
   // Receiving state
   private receivedBuffers: ArrayBuffer[] = [];
-  private receivedSize = 0;
+  private receivedSize = 0; // Bytes of CURRENT file
   private currentFileMeta: FileMetadata | null = null;
-  private startTime = 0;
   private lastProgressEmit = 0;
 
   // Sending state
@@ -152,9 +160,7 @@ export class P2PManager {
   private setupDataChannel(channel: RTCDataChannel) {
     channel.onopen = () => {
       this.log("Data channel ready. You can now transfer files.");
-      // Set high throughput binary type
       channel.binaryType = 'arraybuffer';
-      // Configure buffer threshold for backpressure
       channel.bufferedAmountLowThreshold = 65536; // 64KB
       
       if (this.peerConnection?.connectionState === 'connected') {
@@ -167,30 +173,37 @@ export class P2PManager {
     channel.onmessage = (event) => {
       const { data } = event;
       
-      // 1. Handle Control Messages (Start, End, Ack)
+      // 1. Handle Control Messages
       if (typeof data === 'string') {
         try {
           const msg = JSON.parse(data);
           
-          if (msg.type === 'file-start') {
+          if (msg.type === 'batch-info') {
+             // Initialize Receiver Batch State
+             this.batchState = {
+                 active: true,
+                 totalFiles: msg.batchMeta.totalFiles,
+                 totalSize: msg.batchMeta.totalSize,
+                 processedFiles: 0,
+                 processedBytes: 0,
+                 startTime: Date.now()
+             };
+             this.log(`Incoming batch: ${this.batchState.totalFiles} files (${(this.batchState.totalSize / 1024 / 1024).toFixed(1)} MB)`);
+          }
+          else if (msg.type === 'file-start') {
             this.currentFileMeta = msg.metadata;
-            // Immediate Reset for safety
             this.receivedBuffers = [];
             this.receivedSize = 0;
-            this.startTime = Date.now();
             this.lastProgressEmit = 0;
-            this.log(`Receiving ${msg.metadata.name}...`);
+            this.log(`Receiving ${msg.metadata.name} (${this.batchState.processedFiles + 1}/${this.batchState.totalFiles})...`);
           } 
           else if (msg.type === 'file-end') {
-             // File transfer complete signal from sender
              if (this.currentFileMeta) {
                  this.finishReceivingFile(this.currentFileMeta);
-                 // Send Final ACK to let sender know we saved it
                  channel.send(JSON.stringify({ type: 'ack-finish' }));
              }
           }
           else if (msg.type === 'ack-finish') {
-            // Receiver saved the file, we can unblock
             if (this.finalAckResolver) {
                 this.finalAckResolver();
                 this.finalAckResolver = null;
@@ -198,14 +211,14 @@ export class P2PManager {
           }
         } catch (e) { console.error(e); }
       } 
-      // 2. Handle Binary Chunks (OPTIMIZED PATH)
+      // 2. Handle Binary Chunks
       else if (data instanceof ArrayBuffer) {
         if (!this.currentFileMeta) return;
         
         this.receivedBuffers.push(data);
         this.receivedSize += data.byteLength;
         
-        // Update Progress UI (Throttled)
+        // Update Progress UI
         this.throttledReportProgress(this.receivedSize, this.currentFileMeta.size, this.currentFileMeta.name);
       }
     };
@@ -216,23 +229,27 @@ export class P2PManager {
         const blob = new Blob(this.receivedBuffers, { type: meta.type });
         if (this.fileReceivedCallback) this.fileReceivedCallback(blob, meta);
         this.triggerReceivedNotification(meta.name);
-        // Force 100% progress
+        
+        // Update Batch State
+        this.batchState.processedFiles++;
+        this.batchState.processedBytes += meta.size;
+
+        // Force 100% progress for this file
         this.reportProgress(meta.size, meta.size, meta.name);
       } catch(e) {
           console.error("Failed to assemble file", e);
           this.log("Error: Out of memory assembling file.");
       } finally {
-        // Cleanup memory immediately after blob creation
         this.receivedBuffers = [];
         this.currentFileMeta = null;
       }
   }
 
-  private throttledReportProgress(current: number, total: number, name: string) {
+  private throttledReportProgress(currentFileBytes: number, totalFileBytes: number, name: string) {
       const now = Date.now();
-      // Optimization: Update UI every ~100ms max to save CPU
-      if (current >= total || (now - this.lastProgressEmit > 100)) {
-          this.reportProgress(current, total, name);
+      // Optimization: Update UI every ~100ms
+      if (currentFileBytes >= totalFileBytes || (now - this.lastProgressEmit > 100)) {
+          this.reportProgress(currentFileBytes, totalFileBytes, name);
           this.lastProgressEmit = now;
       }
   }
@@ -247,7 +264,7 @@ export class P2PManager {
       if (count === 1) {
         deviceService.sendNotification('File Received', `Received ${this.recentReceivedFiles[0]}`);
       } else if (count > 1) {
-        deviceService.sendNotification('Files Received', `Received ${count} files`);
+        deviceService.sendNotification('Batch Complete', `Received ${count} files`);
       }
       this.recentReceivedFiles = [];
       this.notificationTimeout = null;
@@ -280,7 +297,7 @@ export class P2PManager {
             const pc = this.createPeerConnection();
             this.dataChannel = pc.createDataChannel('fileTransfer', { 
                 ordered: true,
-                maxRetransmits: 30 // Stop trying if packet is lost for too long (improves latency)
+                maxRetransmits: 30
             });
             this.setupDataChannel(this.dataChannel);
 
@@ -324,32 +341,57 @@ export class P2PManager {
   }
 
   /**
-   * HIGH PERFORMANCE SEND FUNCTION (Worker-Based Multiprocessing)
-   * Offloads file reading and slicing to a Web Worker.
-   * Uses Zero-Copy transfers between Worker and Main Thread.
-   * Manages backpressure to keep the DataChannel healthy.
+   * Sends multiple files as a batch.
+   * Calculates total size first, informs receiver, then sends individually.
    */
-  public async sendFile(file: File): Promise<void> {
-    if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
-        throw new Error("Connection not open");
-    }
+  public async sendFiles(files: File[]): Promise<void> {
+      if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
+          throw new Error("Connection not open");
+      }
 
-    // 1. Send Metadata
+      // 1. Calculate Batch Totals
+      const totalSize = files.reduce((acc, file) => acc + file.size, 0);
+      const totalFiles = files.length;
+      
+      this.batchState = {
+          active: true,
+          totalFiles,
+          totalSize,
+          processedFiles: 0,
+          processedBytes: 0,
+          startTime: Date.now()
+      };
+
+      // 2. Send Batch Metadata
+      const batchMeta: BatchMetadata = { totalFiles, totalSize };
+      this.dataChannel.send(JSON.stringify({ type: 'batch-info', batchMeta }));
+
+      // 3. Process Queue
+      for (const file of files) {
+          await this.sendFileInternal(file);
+          this.batchState.processedFiles++;
+          this.batchState.processedBytes += file.size;
+      }
+      
+      // Reset after batch
+      this.batchState.active = false;
+  }
+
+  /**
+   * Internal Send Function (Worker-Based Multiprocessing)
+   */
+  private async sendFileInternal(file: File): Promise<void> {
     const metadata: FileMetadata = {
         name: file.name,
         size: file.size,
         type: file.type,
     };
-    this.dataChannel.send(JSON.stringify({ type: 'file-start', metadata }));
+    this.dataChannel?.send(JSON.stringify({ type: 'file-start', metadata }));
     
-    this.startTime = Date.now();
+    // We don't reset startTime here for batches, we use batchState.startTime
     this.lastProgressEmit = 0;
 
-    // 2. Initialize Worker for "Multiprocessing"
     const worker = new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
-    
-    // We keep track of offset manually in the orchestration logic or let worker handle it.
-    // Here we use an event-driven loop controlled by backpressure.
     let currentOffset = 0;
     
     return new Promise<void>((resolve, reject) => {
@@ -365,8 +407,7 @@ export class P2PManager {
                 currentOffset = offset;
 
                 try {
-                    // Check Backpressure BEFORE sending
-                    // If buffer is full, wait for 'bufferedamountlow' event
+                    // Backpressure
                     if (this.dataChannel && this.dataChannel.bufferedAmount > MAX_BUFFER_THRESHOLD) {
                         await new Promise<void>(resolveDrain => {
                             if (!this.dataChannel) return resolveDrain();
@@ -378,22 +419,19 @@ export class P2PManager {
                         });
                     }
 
-                    // Send via WebRTC
                     if (this.dataChannel?.readyState === 'open') {
                         this.dataChannel.send(buffer);
+                        // Report using current offset relative to file
                         this.throttledReportProgress(currentOffset, file.size, file.name);
                     } else {
-                        throw new Error("Connection lost during transfer");
+                        throw new Error("Connection lost");
                     }
 
                     if (eof) {
-                        // Done sending file content
                         finish();
                     } else {
-                        // Request next chunk
                         worker.postMessage({ type: 'read_chunk', file, chunkSize: CHUNK_SIZE, startOffset: currentOffset });
                     }
-
                 } catch (error) {
                     worker.terminate();
                     reject(error);
@@ -403,43 +441,52 @@ export class P2PManager {
 
         const finish = async () => {
             worker.terminate();
-            
-            // 3. End Signal & Wait for Confirmation
             try {
                 this.dataChannel?.send(JSON.stringify({ type: 'file-end' }));
-                
-                // Wait for the receiver to say "I have written the file"
                 await new Promise<void>((resolveAck) => {
                     this.finalAckResolver = resolveAck;
-                    setTimeout(() => resolveAck(), 30000); // 30s timeout safety
+                    setTimeout(() => resolveAck(), 30000);
                 });
-
                 this.reportProgress(file.size, file.size, file.name);
                 resolve();
-            } catch (e) {
-                reject(e);
-            }
+            } catch (e) { reject(e); }
         };
 
-        // Start the loop
         worker.postMessage({ type: 'read_chunk', file, chunkSize: CHUNK_SIZE, startOffset: 0 });
     });
   }
+  
+  // Public wrapper for single file (backward compatibility/safety)
+  public async sendFile(file: File) {
+      return this.sendFiles([file]);
+  }
 
-  private reportProgress(current: number, total: number, name: string) {
+  private reportProgress(currentFileBytes: number, totalFileBytes: number, name: string) {
     if (this.progressCallback) {
-        const elapsed = (Date.now() - this.startTime) / 1000;
-        const speed = elapsed > 0 ? current / elapsed : 0;
+        // Calculate Global Batch Progress
+        const totalBatchReceived = this.batchState.processedBytes + currentFileBytes;
+        const totalBatchSize = this.batchState.totalSize || totalFileBytes; // Fallback if single file
+        
+        const elapsed = (Date.now() - this.batchState.startTime) / 1000;
+        const speed = elapsed > 0 ? totalBatchReceived / elapsed : 0;
+        
         const speedStr = speed > 1024 * 1024 
             ? `${(speed / (1024 * 1024)).toFixed(1)} MB/s` 
             : `${(speed / 1024).toFixed(1)} KB/s`;
             
         this.progressCallback({
             fileName: name,
-            transferredBytes: current,
-            totalBytes: total,
+            transferredBytes: currentFileBytes,
+            fileSize: totalFileBytes,
+            
+            // Batch Info
+            totalFiles: this.batchState.totalFiles || 1,
+            currentFileIndex: (this.batchState.processedFiles || 0) + 1,
+            totalBatchBytes: totalBatchSize,
+            transferredBatchBytes: totalBatchReceived,
+            
             speed: speedStr,
-            isComplete: current >= total
+            isComplete: totalBatchReceived >= totalBatchSize
         });
     }
   }
@@ -450,6 +497,8 @@ export class P2PManager {
     this.cleanupPeerConnection();
     this.connectionState = 'idle';
     deviceService.disableWakeLock();
+    // Reset batch
+    this.batchState = { active: false, totalFiles: 0, totalSize: 0, processedFiles: 0, processedBytes: 0, startTime: 0 };
   }
 
   private cleanupPeerConnection() {

@@ -1,5 +1,6 @@
+
 import React, { useRef, useEffect, useState, memo } from 'react';
-import { Plus, Download, X, Check, Archive, UploadCloud, Wifi, WifiOff } from 'lucide-react';
+import { Plus, Download, X, Check, Archive, UploadCloud, Wifi, WifiOff, FileStack } from 'lucide-react';
 import { TransferProgress, ConnectionState } from '../types';
 import JSZip from 'jszip';
 import { deviceService } from '../services/device';
@@ -25,31 +26,46 @@ const formatBytes = (bytes: number, decimals = 2) => {
 
 // --- ISOLATED COMPONENTS TO PREVENT RE-RENDERS ---
 
-// 1. Progress Bar Component (Only re-renders on progress update)
+// 1. Unified Batch Progress Bar Component
 const ProgressBar = memo(({ progress }: { progress: TransferProgress | null }) => {
   if (!progress) return null;
   
-  const percent = Math.min(100, (progress.transferredBytes / progress.totalBytes) * 100);
+  // Calculate percentage based on TOTAL batch size, not individual file
+  const percent = Math.min(100, (progress.transferredBatchBytes / progress.totalBatchBytes) * 100);
   
   return (
-    <div role="status" className="w-full shrink-0 bg-[#1c1c1e] rounded-[2rem] p-6 mb-6 border border-white/5 shadow-lg">
-      <div className="flex justify-between items-center mb-4">
-        <span className="text-sm font-medium text-white truncate max-w-[70%]">{progress.fileName}</span>
-        <span className="text-xs font-mono text-[#737373]">{progress.speed}</span>
+    <div role="status" className="w-full shrink-0 bg-[#1c1c1e] rounded-[2rem] p-6 mb-6 border border-white/5 shadow-lg relative overflow-hidden group">
+      {/* Background glow effect */}
+      <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 opacity-20"></div>
+
+      <div className="flex justify-between items-start mb-4">
+        <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+                <FileStack className="w-4 h-4 text-white" />
+                <span className="text-lg font-bold text-white tracking-tight">
+                    File {progress.currentFileIndex} <span className="text-neutral-500 text-base font-normal">of {progress.totalFiles}</span>
+                </span>
+            </div>
+            <span className="text-xs text-neutral-400 truncate max-w-[200px]">
+                Current: <span className="text-white">{progress.fileName}</span>
+            </span>
+        </div>
+        <div className="flex flex-col items-end">
+            <span className="text-xl font-mono font-bold text-white">{Math.round(percent)}%</span>
+            <span className="text-xs font-mono text-green-400">{progress.speed}</span>
+        </div>
       </div>
-      <div className="w-full bg-[#2c2c2e] h-1.5 rounded-full overflow-hidden mb-2">
+
+      <div className="w-full bg-[#2c2c2e] h-2 rounded-full overflow-hidden mb-3">
         <div 
-            className="bg-white h-full transition-all duration-200 ease-out"
+            className="bg-white h-full transition-all duration-200 ease-out shadow-[0_0_10px_rgba(255,255,255,0.5)]"
             style={{ width: `${percent}%` }}
         />
       </div>
-      <div className="flex justify-between items-center text-xs">
-          <span className="text-[#737373]">
-            {progress.isComplete ? 'Completed' : 'Transferring...'}
-          </span>
-          <span className="text-white font-medium">
-            {Math.round(percent)}%
-          </span>
+
+      <div className="flex justify-between items-center text-[10px] uppercase tracking-wider font-medium text-neutral-500">
+          <span>{formatBytes(progress.transferredBatchBytes)} / {formatBytes(progress.totalBatchBytes)}</span>
+          <span>{progress.isComplete ? 'Complete' : 'Transferring'}</span>
       </div>
     </div>
   );
@@ -149,10 +165,7 @@ export const TransferPanel: React.FC<Props> = ({
 
   // Ensure wake lock is active on mount or interaction
   useEffect(() => {
-      // Try enabling immediately
       deviceService.enableWakeLock();
-      
-      // Also add a one-time click listener to body to capture user gesture for video fallback
       const enableOnInteraction = () => {
           deviceService.enableWakeLock();
           document.removeEventListener('click', enableOnInteraction);
@@ -198,6 +211,7 @@ export const TransferPanel: React.FC<Props> = ({
     <div className="w-full flex flex-col h-full py-4 relative" onClick={() => deviceService.enableWakeLock()}>
       <Header role={role} connectionState={connectionState} onDisconnect={onDisconnect} />
       
+      {/* Unified Progress Card */}
       <ProgressBar progress={progress} />
       
       {role === 'sender' ? (

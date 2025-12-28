@@ -192,9 +192,8 @@ const App: React.FC = () => {
 
   const handleSendFiles = async (files: File[]) => {
     try {
-      for (const file of files) {
-        await p2pManager.sendFile(file);
-      }
+      // Use the batch processing method
+      await p2pManager.sendFiles(files);
       
       if (files.length === 1) {
         deviceService.sendNotification('Transfer Complete', `File ${files[0].name} sent`);
