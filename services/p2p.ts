@@ -6,7 +6,7 @@ import { openDB, IDBPDatabase } from 'idb';
 
 // --- PERFORMANCE TUNING (Ultra-Stable Mode) ---
 // 64KB is the sweet spot for Chrome/WebRTC. Larger chunks (256KB) can cause fragmentation and jitter.
-const CHUNK_SIZE = 64 * 1024; 
+const CHUNK_SIZE = 256 * 1024; 
 const MAX_BUFFERED_AMOUNT = 8 * 1024 * 1024; // 8MB Buffer
 const MAX_QUEUE_SIZE = 16; // Increased queue depth for smaller chunks
 const ACK_TIMEOUT_MS = 60000;
