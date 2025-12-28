@@ -4,26 +4,33 @@ import { ConnectionState, FileMetadata, TransferProgress, BatchMetadata } from '
 import { deviceService } from './device';
 import { openDB, IDBPDatabase } from 'idb';
 
-// --- PERFORMANCE TUNING (Ultra-Stable Mode) ---
-// 64KB is the sweet spot for Chrome/WebRTC. Larger chunks (256KB) can cause fragmentation and jitter.
-const CHUNK_SIZE = 256 * 1024; 
+// --- PERFORMANCE TUNING (Compatibility Mode) ---
+// Reverted settings based on user feedback for maximum stability
+const CHUNK_SIZE = 256 * 1024; // 256KB
 const MAX_BUFFERED_AMOUNT = 8 * 1024 * 1024; // 8MB Buffer
-const MAX_QUEUE_SIZE = 16; // Increased queue depth for smaller chunks
+const MAX_QUEUE_SIZE = 8; 
 const ACK_TIMEOUT_MS = 60000;
-const CONCURRENT_CHANNELS = 3; // Keep concurrent channels for parallel throughput
+const CONCURRENT_CHANNELS = 3; 
 
-// Threshold to switch from RAM to IndexedDB (200MB)
-// Files smaller than this use RAM (Faster), larger use Disk (Stable)
-const RAM_THRESHOLD = 200 * 1024 * 1024;
+// Threshold to switch from RAM to IndexedDB (150MB)
+const RAM_THRESHOLD = 150 * 1024 * 1024;
+
+// Optimized Write Batch Size for IDB (Write to disk every ~2.5MB)
+// Reducing transaction overhead significantly speeds up transfer.
+const IDB_BATCH_SIZE = 10; 
 
 const createWorker = () => new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
 
-// --- STORAGE ENGINE (RAM vs IDB) ---
+// --- STORAGE ENGINE (RAM vs IDB with Batch Optimization) ---
 class ChunkStore {
     private useDB: boolean;
     private ramChunks: ArrayBuffer[] = [];
+    
+    // IDB specific
     private dbName: string | null = null;
     private db: IDBPDatabase | null = null;
+    private writeQueue: ArrayBuffer[] = []; // Temporary RAM buffer for batching
+    
     private fileName: string;
     private fileType: string;
 
@@ -46,14 +53,39 @@ class ChunkStore {
 
     async addChunk(chunk: ArrayBuffer) {
         if (this.useDB && this.db) {
-            await this.db.add('chunks', { data: chunk });
+            // Add to fast memory queue first
+            this.writeQueue.push(chunk);
+
+            // Only flush to disk when we hit the batch size
+            if (this.writeQueue.length >= IDB_BATCH_SIZE) {
+                await this.flushQueue();
+            }
         } else {
             this.ramChunks.push(chunk);
         }
     }
 
+    // Writes accumulated chunks to IDB in a single transaction
+    private async flushQueue() {
+        if (this.writeQueue.length === 0 || !this.db) return;
+
+        const tx = this.db.transaction('chunks', 'readwrite');
+        const store = tx.objectStore('chunks');
+        
+        // Execute all adds in parallel within one transaction
+        // This is MUCH faster than awaiting them one by one
+        const promises = this.writeQueue.map(data => store.add({ data }));
+        this.writeQueue = []; // Clear queue immediately
+        
+        await Promise.all(promises);
+        await tx.done;
+    }
+
     async finish(): Promise<Blob> {
         if (this.useDB && this.db) {
+            // Ensure any remaining items in queue are written
+            await this.flushQueue();
+
             // Reassemble from IDB
             const tx = this.db.transaction('chunks', 'readonly');
             const store = tx.objectStore('chunks');
@@ -74,6 +106,7 @@ class ChunkStore {
 
     async cleanup() {
         this.ramChunks = [];
+        this.writeQueue = [];
         if (this.db) {
             this.db.close();
             if (this.dbName) await window.indexedDB.deleteDatabase(this.dbName);
@@ -111,7 +144,7 @@ class TransferChannel {
 
     private setupEvents() {
         this.channel.binaryType = 'arraybuffer';
-        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE * 4; // Notify earlier to keep pipe full
+        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE * 2; 
 
         this.channel.onopen = () => {
             console.log(`[Channel ${this.id}] Open`);
@@ -245,7 +278,7 @@ class TransferChannel {
                     clearInterval(check);
                     resolve();
                 }
-            }, 5); // 5ms check for tighter control
+            }, 10);
         });
     }
 
