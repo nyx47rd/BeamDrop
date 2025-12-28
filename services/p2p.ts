@@ -5,9 +5,9 @@ import { deviceService } from './device';
 
 // --- PERFORMANCE TUNING ---
 const CHUNK_SIZE = 64 * 1024; // 64KB standard chunk
-const MAX_BUFFERED_AMOUNT = 1024 * 1024; // 1MB Backpressure limit (Tighter control)
-const MAX_QUEUE_SIZE = 4; // Reduced queue size to prevent memory spikes on mobile
-const ACK_TIMEOUT_MS = 5000; // Force continue if receiver doesn't ack in 5s
+const MAX_BUFFERED_AMOUNT = 1024 * 1024; // 1MB Backpressure limit
+const MAX_QUEUE_SIZE = 4; // Max chunks in memory per channel
+const ACK_TIMEOUT_MS = 5000; // Force continue if receiver doesn't ack
 
 const CONCURRENT_CHANNELS = 2;
 
@@ -40,7 +40,7 @@ class TransferChannel {
 
     private setupEvents() {
         this.channel.binaryType = 'arraybuffer';
-        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE; // Notify as soon as one chunk space is free
+        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE;
 
         this.channel.onopen = () => {
             console.log(`[Channel ${this.id}] Open`);
@@ -70,10 +70,11 @@ class TransferChannel {
             await this.sendFileLogic(file);
         } catch (e) {
             console.error(`[Channel ${this.id}] Send Error (skipped file):`, e);
+            // Even on error, we might want to count it as "processed" to unblock the batch
+            this.manager.markSenderFileComplete(); 
         } finally {
             this.isBusy = false;
             this.currentFile = null;
-            // Introduce a tiny microtask delay to let UI breathe
             setTimeout(() => this.processQueue(), 10);
         }
     }
@@ -84,15 +85,16 @@ class TransferChannel {
             size: file.size,
             type: file.type,
         };
+
+        // 1. UPDATE UI: Tell manager we are working on this file (SENDER SIDE)
+        this.manager.notifyFileStart(file.name);
         
-        // 1. Send Start Marker
+        // 2. Send Start Marker
         this.channel.send(JSON.stringify({ type: 'file-start', metadata }));
 
         return new Promise<void>((resolve, reject) => {
             const worker = createWorker();
             let fileOffset = 0;
-            let failureTimeout: any = null;
-            
             this.pendingReadRequests = 0;
 
             const pump = () => {
@@ -102,7 +104,7 @@ class TransferChannel {
                     return;
                 }
 
-                // BACKPRESSURE: Stop reading if network buffer is full
+                // BACKPRESSURE
                 if (this.channel.bufferedAmount > MAX_BUFFERED_AMOUNT || this.pendingReadRequests >= MAX_QUEUE_SIZE) {
                     return; 
                 }
@@ -139,7 +141,6 @@ class TransferChannel {
                     this.pendingReadRequests--;
 
                     try {
-                        // Send binary
                         this.channel.send(buffer);
                         this.manager.updateProgress(buffer.byteLength);
 
@@ -147,20 +148,18 @@ class TransferChannel {
                             worker.terminate();
                             this.channel.onbufferedamountlow = null;
                             
-                            // CRITICAL FIX: Wait for buffer to drain before sending End-Of-File
-                            // This ensures the receiver gets all bytes before the JSON command
                             await this.waitForDrain();
-                            
                             this.channel.send(JSON.stringify({ type: 'file-end' }));
-                            
-                            // Wait for ACK with timeout prevention
                             await this.waitForAckOrTimeout();
+                            
+                            // 3. UPDATE UI: Tell manager file is done (SENDER SIDE)
+                            this.manager.markSenderFileComplete();
+                            
                             resolve();
                         } else {
                             pump();
                         }
                     } catch (err) {
-                        console.error("Send fail", err);
                         worker.terminate();
                         reject(err);
                     }
@@ -171,10 +170,8 @@ class TransferChannel {
         });
     }
 
-    // Ensures we don't send "Finish" command while bytes are still stuck in the buffer
     private async waitForDrain(): Promise<void> {
         if (this.channel.bufferedAmount === 0) return;
-        
         return new Promise(resolve => {
             const check = setInterval(() => {
                 if (this.channel.bufferedAmount === 0 || this.channel.readyState !== 'open') {
@@ -190,12 +187,10 @@ class TransferChannel {
             let solved = false;
             const originalHandler = this.channel.onmessage;
             
-            // Timeout safety net (prevents freezing)
             const timeout = setTimeout(() => {
                 if (!solved) {
                     solved = true;
                     this.channel.onmessage = originalHandler;
-                    console.warn(`[Channel ${this.id}] ACK Timed out, forcing continue.`);
                     resolve();
                 }
             }, ACK_TIMEOUT_MS);
@@ -236,20 +231,12 @@ class TransferChannel {
             this.currentMeta = msg.metadata;
             this.receivedBuffers = [];
             this.receivedSize = 0;
-            // Notify manager we started a file
+            // Receiver Side UI Update
             this.manager.notifyFileStart(msg.metadata.name);
         }
         else if (msg.type === 'file-end') {
             if (this.currentMeta) {
-                // Verify size integrity
-                if (this.receivedSize === this.currentMeta.size) {
-                    this.finishFile(this.currentMeta);
-                } else {
-                    console.error(`Size Mismatch! Expected ${this.currentMeta.size}, got ${this.receivedSize}`);
-                    // Still finish to unblock UI, but maybe warn?
-                    this.finishFile(this.currentMeta); 
-                }
-                // Send ACK
+                this.finishFile(this.currentMeta);
                 try {
                     this.channel.send(JSON.stringify({ type: 'ack-finish' }));
                 } catch(e) {}
@@ -266,7 +253,7 @@ class TransferChannel {
 
     private finishFile(meta: FileMetadata) {
         const blob = new Blob(this.receivedBuffers, { type: meta.type });
-        this.manager.handleFileComplete(blob, meta);
+        this.manager.handleReceiverFileComplete(blob, meta);
         this.receivedBuffers = [];
         this.currentMeta = null;
         this.receivedSize = 0;
@@ -302,7 +289,7 @@ export class P2PManager {
     transferredBytes: 0,
     startTime: 0,
     completedFilesCount: 0,
-    currentFileName: '' // Track active file name globally
+    currentFileName: ''
   };
   
   private lastProgressEmit = 0;
@@ -329,7 +316,7 @@ export class P2PManager {
           transferredBytes: 0,
           startTime: Date.now(),
           completedFilesCount: 0,
-          currentFileName: 'Starting...'
+          currentFileName: 'Initializing...'
       };
 
       const batchMeta: BatchMetadata = { totalFiles: files.length, totalSize };
@@ -380,24 +367,37 @@ export class P2PManager {
   public updateProgress(bytesAdded: number) {
       this.batchState.transferredBytes += bytesAdded;
       
+      // Safety Cap: Don't exceed total size
+      if (this.batchState.transferredBytes > this.batchState.totalSize) {
+          this.batchState.transferredBytes = this.batchState.totalSize;
+      }
+
       const now = Date.now();
-      // Rate limit to 20fps for UI smoothness
       if (now - this.lastProgressEmit > 50 || this.batchState.transferredBytes >= this.batchState.totalSize) {
           this.emitProgress();
           this.lastProgressEmit = now;
       }
   }
 
-  public handleFileComplete(blob: Blob, meta: FileMetadata) {
+  // Called by Sender when ACK is received
+  public markSenderFileComplete() {
+      this.batchState.completedFilesCount++;
+      // If we are done, force total transferred bytes to equal total size (fix floating point issues)
+      if (this.batchState.completedFilesCount === this.batchState.totalFiles) {
+          this.batchState.transferredBytes = this.batchState.totalSize;
+      }
+      this.emitProgress();
+  }
+
+  // Called by Receiver when file is built
+  public handleReceiverFileComplete(blob: Blob, meta: FileMetadata) {
       this.batchState.completedFilesCount++;
       if (this.fileReceivedCallback) {
           this.fileReceivedCallback(blob, meta);
       }
-      
       if (this.batchState.completedFilesCount >= this.batchState.totalFiles) {
           deviceService.sendNotification('Transfer Complete', `All ${this.batchState.totalFiles} files received`);
       }
-      
       this.emitProgress();
   }
 
@@ -411,13 +411,10 @@ export class P2PManager {
           ? `${(speed / (1024 * 1024)).toFixed(1)} MB/s` 
           : `${(speed / 1024).toFixed(0)} KB/s`;
 
-      // FIX: Ensure we don't show "File 4 of 3". Clamp to totalFiles.
       let displayIndex = this.batchState.completedFilesCount + 1;
       if (displayIndex > this.batchState.totalFiles) displayIndex = this.batchState.totalFiles;
       
-      // If complete, ensure we show 100%
       const isComplete = this.batchState.completedFilesCount === this.batchState.totalFiles;
-      const transferred = isComplete ? this.batchState.totalSize : this.batchState.transferredBytes;
 
       this.progressCallback({
           fileName: isComplete ? 'Complete' : this.batchState.currentFileName,
@@ -426,14 +423,13 @@ export class P2PManager {
           totalFiles: this.batchState.totalFiles,
           currentFileIndex: displayIndex,
           totalBatchBytes: this.batchState.totalSize,
-          transferredBatchBytes: transferred,
+          transferredBatchBytes: this.batchState.transferredBytes,
           speed: isComplete ? 'Done' : speedStr,
           isComplete: isComplete
       });
   }
 
   // --- WEBRTC BOILERPLATE ---
-  // (Same as before, simplified for brevity in this change block)
   private log(message: string) {
     console.log(`[P2P] ${message}`);
     if (this.logCallback) this.logCallback(message);
