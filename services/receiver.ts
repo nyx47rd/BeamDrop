@@ -7,7 +7,7 @@ import { TransferMonitor } from './stats';
 const HEADER_SIZE = 4;
 const RAM_THRESHOLD = 150 * 1024 * 1024; // 150MB
 const IDB_BATCH_SIZE = 100;
-const SYNC_INTERVAL_MS = 500; // Update UI and Sender every 500ms
+const SYNC_INTERVAL_MS = 200; // More frequent updates for smoother UI
 
 // --- STORAGE ENGINE ---
 class ChunkStore {
@@ -72,8 +72,7 @@ export class ReceiverManager {
     private controlChannel: RTCDataChannel | null = null;
     private chunkStore: ChunkStore | null = null;
     private currentMeta: FileMetadata | null = null;
-    private pendingOrphanChunks: Map<number, ArrayBuffer> = new Map();
-    private monitor: TransferMonitor; // Dedicated Stats Engine
+    private monitor: TransferMonitor; 
 
     // UI Callbacks
     private onProgress: (p: TransferProgress) => void;
@@ -99,58 +98,61 @@ export class ReceiverManager {
     }
 
     public async handleMessage(data: any, isBinary: boolean) {
-        // 1. Binary Data (Chunks)
+        // 1. BINARY DATA (CHUNKS)
         if (isBinary && data instanceof ArrayBuffer) {
+            if (!this.chunkStore) return; // Should not happen with strict handshake
+
             const view = new DataView(data);
             const index = view.getUint32(0, false);
             const chunk = data.slice(HEADER_SIZE);
             const byteLength = chunk.byteLength;
 
-            if (this.chunkStore) {
-                await this.chunkStore.add(index, chunk);
-                this.handleBytesReceived(byteLength);
-            } else {
-                this.pendingOrphanChunks.set(index, chunk);
-            }
+            await this.chunkStore.add(index, chunk);
+            this.handleBytesReceived(byteLength);
             return;
         }
 
-        // 2. Control Messages
+        // 2. CONTROL MESSAGES
         if (!isBinary) {
-            if (data.type === 'batch-info') {
+            // STEP 1: Batch Offer
+            if (data.type === 'offer-batch') {
+                console.log("Receiver: Got Batch Offer", data.meta);
                 this.totalFilesCount = data.meta.totalFiles;
                 this.completedFilesCount = 0;
                 this.monitor.reset(data.meta.totalSize);
+                
+                // Reply: ACCEPT
+                this.sendControl({ type: 'accept-batch' });
             }
+            // STEP 2: File Start
             else if (data.type === 'file-start') {
+                console.log("Receiver: Got File Start", data.meta);
                 this.currentMeta = data.meta;
                 this.currentFileName = data.meta.name;
                 
                 this.chunkStore = new ChunkStore(data.meta.size, data.meta.type);
                 await this.chunkStore.init();
 
-                // Process Orphans
-                if (this.pendingOrphanChunks.size > 0) {
-                    for (const [idx, chunk] of this.pendingOrphanChunks) {
-                        await this.chunkStore.add(idx, chunk);
-                        this.handleBytesReceived(chunk.byteLength);
-                    }
-                    this.pendingOrphanChunks.clear();
-                }
+                // Initial Progress Update
                 this.emitProgress();
+
+                // Reply: READY (This triggers the sender to start pumping)
+                this.sendControl({ type: 'ready-for-file' });
             }
+            // STEP 3: File End
             else if (data.type === 'file-end') {
+                console.log("Receiver: Got File End");
                 if (this.chunkStore && this.currentMeta) {
                     const blob = await this.chunkStore.finish();
                     this.onFileReceived(blob, this.currentMeta);
                     
                     this.completedFilesCount++;
                     
-                    // Final Progress Emit for this file
+                    // Force final 100% update for this file
                     this.emitProgress();
 
-                    // Send ACK
-                    this.controlChannel?.send(JSON.stringify({ type: 'ack-file' }));
+                    // Reply: ACK
+                    this.sendControl({ type: 'ack-file' });
                     
                     if (this.completedFilesCount === this.totalFilesCount) {
                          deviceService.sendNotification('Files Received', `All ${this.totalFilesCount} files received.`);
@@ -179,7 +181,7 @@ export class ReceiverManager {
         // 1. Update Local UI
         this.onProgress({
             fileName: this.currentFileName,
-            transferredBytes: 0, // Not used heavily in batch view
+            transferredBytes: 0, 
             fileSize: 0, 
             totalFiles: this.totalFilesCount,
             currentFileIndex: this.completedFilesCount + 1,
@@ -190,24 +192,26 @@ export class ReceiverManager {
             isComplete: this.completedFilesCount === this.totalFilesCount && this.totalFilesCount > 0
         });
 
-        // 2. SYNC WITH SENDER (The key fix)
-        // We act as the Source of Truth for the sender
+        // 2. SYNC WITH SENDER
+        this.sendControl({
+            type: 'progress-sync',
+            progressReport: {
+                transferredBytes: metrics.transferredBytes,
+                speed: metrics.speed,
+                eta: metrics.eta,
+                totalFiles: this.totalFilesCount,
+                completedFiles: this.completedFilesCount
+            }
+        });
+    }
+
+    private sendControl(msg: any) {
         if (this.controlChannel?.readyState === 'open') {
-            this.controlChannel.send(JSON.stringify({
-                type: 'progress-sync',
-                progressReport: {
-                    transferredBytes: metrics.transferredBytes,
-                    speed: metrics.speed,
-                    eta: metrics.eta,
-                    totalFiles: this.totalFilesCount,
-                    completedFiles: this.completedFilesCount
-                }
-            }));
+            this.controlChannel.send(JSON.stringify(msg));
         }
     }
 
     public cleanup() {
         this.chunkStore = null;
-        this.pendingOrphanChunks.clear();
     }
 }

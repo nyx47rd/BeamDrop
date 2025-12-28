@@ -19,7 +19,7 @@ export interface ProgressReport {
 }
 
 export interface ChunkData {
-  type: 'batch-info' | 'file-start' | 'file-chunk' | 'file-end' | 'message' | 'progress-sync';
+  type: 'offer-batch' | 'accept-batch' | 'file-start' | 'ready-for-file' | 'file-chunk' | 'file-end' | 'ack-file' | 'progress-sync';
   metadata?: FileMetadata;
   batchMeta?: BatchMetadata;
   progressReport?: ProgressReport;

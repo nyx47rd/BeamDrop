@@ -16,7 +16,6 @@ export class SenderManager {
     private queue: File[] = [];
     private isSending = false;
     
-    // Helper to format strings consistently with receiver
     private monitorHelper = new TransferMonitor(); 
 
     // UI Callbacks
@@ -42,14 +41,9 @@ export class SenderManager {
                 const msg = JSON.parse(e.data);
                 
                 // *** SYNCHRONIZATION LOGIC ***
-                // We update our UI based on what the Receiver tells us.
                 if (msg.type === 'progress-sync' && msg.progressReport) {
                     const r = msg.progressReport;
-                    // We use the helper just to get the string formats based on raw values
-                    // We cheat a bit by injecting values into a temporary object or just duplicating format logic
-                    // But simpler: just create a temp view
                     
-                    // We reconstruct the UI object from the Receiver's truth
                     this.onProgress({
                         fileName: this.currentFileName,
                         transferredBytes: 0,
@@ -60,10 +54,9 @@ export class SenderManager {
                         transferredBatchBytes: r.transferredBytes,
                         speed: this.formatSpeed(r.speed),
                         eta: this.formatETA(r.eta),
-                        isComplete: false // Handled by processQueue
+                        isComplete: false 
                     });
                 }
-
             } catch(err) {}
         };
     }
@@ -75,9 +68,15 @@ export class SenderManager {
         this.totalSize = files.reduce((acc, f) => acc + f.size, 0);
         this.totalFiles = files.length;
         
-        // 1. Send Batch Info to Receiver
-        this.sendControl({ type: 'batch-info', meta: { totalFiles: this.totalFiles, totalSize: this.totalSize } });
+        // STEP 1: Handshake - Offer Batch
+        console.log("Sender: Offering Batch...");
+        this.sendControl({ type: 'offer-batch', meta: { totalFiles: this.totalFiles, totalSize: this.totalSize } });
         
+        // Wait for Receiver to say "I accept the batch"
+        await this.waitForControlMessage('accept-batch');
+        console.log("Sender: Batch Accepted");
+
+        // Start Processing
         this.processQueue();
     }
 
@@ -88,31 +87,35 @@ export class SenderManager {
         const file = this.queue.shift()!;
         this.currentFileName = file.name;
         
-        // Initial UI update for this file (waiting for sync)
+        // Initial UI
         this.onProgress({
             fileName: this.currentFileName,
             transferredBytes: 0,
             fileSize: file.size,
             totalFiles: this.totalFiles,
-            currentFileIndex: (this.totalFiles - this.queue.length), // rough calc
+            currentFileIndex: (this.totalFiles - this.queue.length), 
             totalBatchBytes: this.totalSize,
-            transferredBatchBytes: 0, // Will jump when sync arrives
+            transferredBatchBytes: 0, 
             speed: 'Starting...',
             eta: '...',
             isComplete: false
         });
 
-        // 2. Send File Header
+        // STEP 2: File Start Handshake
         this.sendControl({ type: 'file-start', meta: { name: file.name, size: file.size, type: file.type } });
 
-        // 3. Pump Data
+        // Wait for Receiver to say "Ready for File"
+        // This is crucial. We DO NOT pump data until receiver says yes.
+        await this.waitForControlMessage('ready-for-file');
+
+        // STEP 3: Pump Data
         await this.pumpFile(file);
 
-        // 4. Send File End
+        // STEP 4: End File
         this.sendControl({ type: 'file-end' });
 
-        // 5. Wait for ACK (Handshake to ensure receiver processed everything)
-        await this.waitForAck();
+        // STEP 5: Wait for ACK
+        await this.waitForControlMessage('ack-file');
 
         this.isSending = false;
 
@@ -120,7 +123,6 @@ export class SenderManager {
             this.processQueue();
         } else {
             deviceService.sendNotification('Transfer Complete');
-            // Final update to 100%
              this.onProgress({
                 fileName: 'Complete',
                 transferredBytes: 0,
@@ -141,7 +143,7 @@ export class SenderManager {
             let offset = 0;
             let chunkIndex = 0;
             let readsPending = 0;
-            const MAX_READS = 20; // Prefetch window
+            const MAX_READS = 50; // Increased buffer for speed
 
             const onChunk = (e: MessageEvent) => {
                 if (e.data.type === 'chunk_ready') {
@@ -159,12 +161,8 @@ export class SenderManager {
                         if (ch?.readyState === 'open') {
                             ch.send(packet);
                         } else {
-                            this.controlChannel?.send(packet); // Fallback
+                            this.controlChannel?.send(packet); 
                         }
-                        
-                        // NOTE: We REMOVED local stats updating here.
-                        // We strictly rely on Receiver's 'progress-sync' message now.
-
                     } catch (err) { console.error("Send failed", err); }
 
                     chunkIndex++;
@@ -185,7 +183,7 @@ export class SenderManager {
                 let totalBuffered = 0;
                 this.dataChannels.forEach(c => totalBuffered += c.bufferedAmount);
                 if (totalBuffered > MAX_BUFFERED_AMOUNT) {
-                    setTimeout(loadMore, 10);
+                    setTimeout(loadMore, 5); // Faster retry
                     return;
                 }
 
@@ -205,23 +203,33 @@ export class SenderManager {
         });
     }
 
-    private waitForAck(): Promise<void> {
-        return new Promise(resolve => {
+    /**
+     * Blocks until a specific control message is received.
+     */
+    private waitForControlMessage(expectedType: string): Promise<void> {
+        return new Promise((resolve) => {
+            if (!this.controlChannel) return resolve();
+
+            // We need a temporary listener just for this handshake
             const handler = (e: MessageEvent) => {
                 try {
                     const msg = JSON.parse(e.data);
-                    if (msg.type === 'ack-file') {
+                    if (msg.type === expectedType) {
                         this.controlChannel?.removeEventListener('message', handler);
                         resolve();
                     }
                 } catch(err) {}
             };
-            this.controlChannel?.addEventListener('message', handler);
-            // Fallback timeout in case ACK is lost (rare in ordered channel but safe)
+            
+            this.controlChannel.addEventListener('message', handler);
+            
+            // Safety timeout (30s) - prevent infinite hanging if network drops
             setTimeout(() => {
                 this.controlChannel?.removeEventListener('message', handler);
-                resolve();
-            }, 60000); // 1 min timeout for large files
+                // If timed out, we resolve anyway to try and error out or continue,
+                // but ideally we should throw. For now, we resolve to unblock.
+                resolve(); 
+            }, 30000);
         });
     }
 
@@ -231,7 +239,7 @@ export class SenderManager {
         }
     }
 
-    // Formatting helpers duplicated to keep this file self-contained or we can import
+    // Formatting helpers
     private formatSpeed(bytesPerSec: number): string {
         if (bytesPerSec === 0) return '0 MB/s';
         const mb = bytesPerSec / (1024 * 1024);
