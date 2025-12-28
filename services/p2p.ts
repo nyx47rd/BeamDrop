@@ -9,7 +9,7 @@ const CHUNK_SIZE = 256 * 1024; // 256KB Payload
 const HEADER_SIZE = 4; // 4 Bytes for Sequence Index (Uint32)
 const PACKET_SIZE = CHUNK_SIZE + HEADER_SIZE; 
 
-const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024; // Increased to 16MB for high throughput
+const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024; // 16MB
 
 // Aggressive Prefetching
 const MAX_QUEUE_SIZE = 40; 
@@ -32,7 +32,7 @@ const createWorker = () => new Worker(new URL('./workers/fileTransfer.worker.ts'
 class ChunkStore {
     private useDB: boolean;
     
-    // RAM Storage: Stores objects { index, data } then sorts on finish
+    // RAM Storage
     private ramChunks: { index: number, data: ArrayBuffer }[] = [];
     
     // IDB Specific
@@ -54,7 +54,6 @@ class ChunkStore {
             this.dbName = `beamdrop_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
             this.db = await openDB(this.dbName, 1, {
                 upgrade(db) {
-                    // Critical: Use 'index' as keyPath to allow auto-sorting by IDB
                     db.createObjectStore('chunks', { keyPath: 'index' });
                 },
             });
@@ -76,9 +75,7 @@ class ChunkStore {
         if (this.writeQueue.length === 0 || !this.db) return;
         const tx = this.db.transaction('chunks', 'readwrite');
         const store = tx.objectStore('chunks');
-        
-        // Batch add
-        const promises = this.writeQueue.map(item => store.put(item)); // put handles updates/inserts
+        const promises = this.writeQueue.map(item => store.put(item));
         this.writeQueue = []; 
         await Promise.all(promises);
         await tx.done;
@@ -89,8 +86,6 @@ class ChunkStore {
             await this.flushQueue();
             const tx = this.db.transaction('chunks', 'readonly');
             const store = tx.objectStore('chunks');
-            
-            // IDB 'getAll' returns items sorted by key (index) automatically!
             const allChunks = await store.getAll(); 
             const blobs = allChunks.map(c => c.data);
             const blob = new Blob(blobs, { type: this.fileType });
@@ -99,7 +94,6 @@ class ChunkStore {
             await window.indexedDB.deleteDatabase(this.dbName!);
             return blob;
         } else {
-            // RAM Sort
             this.ramChunks.sort((a, b) => a.index - b.index);
             const blobs = this.ramChunks.map(c => c.data);
             const blob = new Blob(blobs, { type: this.fileType });
@@ -130,10 +124,12 @@ class TransferChannel {
     
     private pendingReadRequests = 0;
     private ackResolver: (() => void) | null = null;
+    private startAckResolver: (() => void) | null = null; // New Handshake Resolver
     
     private receivedSize = 0;
     private currentMeta: FileMetadata | null = null;
     private chunkStore: ChunkStore | null = null;
+    private pendingFinish = false; // Handle race where file-end comes before last chunk
     
     constructor(id: number, channel: RTCDataChannel, manager: P2PManager) {
         this.id = id;
@@ -195,7 +191,13 @@ class TransferChannel {
         };
 
         this.manager.notifyFileStart(file.name);
+        
+        // 1. Send Start Signal
         this.channel.send(JSON.stringify({ type: 'file-start', metadata }));
+        
+        // 2. CRITICAL: Wait for Receiver to say "Ready"
+        // This prevents unordered chunks from arriving before the store is initialized.
+        await this.waitForStartAck();
 
         return new Promise<void>((resolve, reject) => {
             let fileOffset = 0;
@@ -243,28 +245,16 @@ class TransferChannel {
                     this.pendingReadRequests--;
 
                     try {
-                        // -----------------------------------------------------
-                        // HEADER INJECTION (The Secret Sauce)
-                        // We wrap the chunk with a 4-byte index so it can
-                        // travel out-of-order and be reassembled later.
-                        // -----------------------------------------------------
+                        // HEADER INJECTION
                         const chunkIndex = Math.floor((offset - buffer.byteLength) / CHUNK_SIZE);
-                        
-                        // Create a new buffer: Header (4 bytes) + Data
                         const packet = new Uint8Array(HEADER_SIZE + buffer.byteLength);
                         const view = new DataView(packet.buffer);
-                        
-                        // Write Index
                         view.setUint32(0, chunkIndex); 
-                        
-                        // Write Data
                         packet.set(new Uint8Array(buffer), HEADER_SIZE);
 
-                        // Send the wrapped packet
                         this.channel.send(packet);
                         
-                        // Sync logic remains same
-                        // this.manager.updateProgress(buffer.byteLength); 
+                        // We rely on 'progress-sync' from receiver for UI updates
 
                         if (eof) {
                             worker.removeEventListener('message', messageHandler);
@@ -315,6 +305,21 @@ class TransferChannel {
         });
     }
 
+    private waitForStartAck(): Promise<void> {
+        return new Promise(resolve => {
+            this.startAckResolver = resolve;
+            // Shorter timeout for start handshake
+            setTimeout(() => {
+                if (this.startAckResolver) {
+                    // Fallback: Just start if ack missing (shouldn't happen)
+                    console.warn("Start ACK timed out, forcing start");
+                    this.startAckResolver();
+                    this.startAckResolver = null;
+                }
+            }, 5000); 
+        });
+    }
+
     private handleMessage(event: MessageEvent) {
         const { data } = event;
         if (typeof data === 'string') {
@@ -331,19 +336,37 @@ class TransferChannel {
         else if (msg.type === 'file-start') {
             this.currentMeta = msg.metadata;
             this.receivedSize = 0;
+            this.pendingFinish = false;
             this.chunkStore = new ChunkStore(msg.metadata.name, msg.metadata.size, msg.metadata.type);
             await this.chunkStore.init();
+            
             this.manager.notifyFileStart(msg.metadata.name);
+            
+            // Reply with Ready Signal
+            try {
+                this.channel.send(JSON.stringify({ type: 'ack-start', fileName: msg.metadata.name }));
+            } catch(e) {}
+        }
+        else if (msg.type === 'ack-start') {
+            if (this.startAckResolver) {
+                this.startAckResolver();
+                this.startAckResolver = null;
+            }
         }
         else if (msg.type === 'progress-sync') {
             this.manager.syncProgress(msg.bytes, msg.fileName);
         }
         else if (msg.type === 'file-end') {
-            if (this.currentMeta && this.chunkStore) {
+            // Check if we already have all bytes
+            if (this.currentMeta && this.receivedSize >= this.currentMeta.size) {
                 await this.finishFile(this.currentMeta);
                 try {
                     this.channel.send(JSON.stringify({ type: 'ack-finish' }));
                 } catch(e) {}
+            } else {
+                // Not done yet? Mark as pending finish.
+                // The last chunk will trigger the finish logic.
+                this.pendingFinish = true;
             }
         }
         else if (msg.type === 'ack-finish') {
@@ -355,22 +378,36 @@ class TransferChannel {
     }
 
     private async handleBinaryData(buffer: ArrayBuffer) {
-        if (!this.currentMeta || !this.chunkStore) return;
+        if (!this.currentMeta || !this.chunkStore) {
+            // This should trigger less often now due to ack-start handshake
+            console.warn("Dropped orphaned chunk (No Meta/Store)");
+            return;
+        }
         
-        // -----------------------------------------------------
-        // UNWRAP PACKET
-        // Read header to find where this chunk belongs
-        // -----------------------------------------------------
         const view = new DataView(buffer);
-        const index = view.getUint32(0); // Read 4-byte header
-        
-        // Extract actual data (skip first 4 bytes)
+        const index = view.getUint32(0); 
         const data = buffer.slice(HEADER_SIZE);
         
         await this.chunkStore.addChunk(index, data);
         this.receivedSize += data.byteLength;
         
         this.manager.updateProgress(data.byteLength);
+
+        // Check for completion (Robust Unordered Logic)
+        if (this.currentMeta && this.receivedSize >= this.currentMeta.size) {
+            // If we have received all bytes...
+            // And if we either got the 'file-end' signal OR strictly trust size
+            // For safety, we usually wait for file-end, but if it arrived early (pendingFinish), we finish now.
+            // Or if we trust size 100%, we finish now. 
+            // Let's trust size + pendingFinish/Wait for end to be safe? 
+            // Actually, waiting for file-end is safer to ensure Sender is truly done logic.
+            if (this.pendingFinish) {
+                 await this.finishFile(this.currentMeta);
+                 try {
+                    this.channel.send(JSON.stringify({ type: 'ack-finish' }));
+                } catch(e) {}
+            }
+        }
     }
 
     private async finishFile(meta: FileMetadata) {
@@ -380,6 +417,7 @@ class TransferChannel {
         this.chunkStore = null;
         this.currentMeta = null;
         this.receivedSize = 0;
+        this.pendingFinish = false;
     }
 
     public cleanup() {
@@ -388,6 +426,7 @@ class TransferChannel {
         if (this.chunkStore) this.chunkStore.cleanup();
         this.fileQueue = [];
         if (this.ackResolver) this.ackResolver();
+        if (this.startAckResolver) this.startAckResolver();
     }
 }
 
