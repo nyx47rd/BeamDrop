@@ -31,6 +31,37 @@ const App: React.FC = () => {
   const [receivedFiles, setReceivedFiles] = useState<{ blob: Blob; name: string }[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // SEO & UX: Dynamic Title and URL Management
+  useEffect(() => {
+    const baseTitle = "BeamDrop";
+    let path = "/";
+    let title = `${baseTitle} - Secure P2P File Transfer`;
+
+    switch (appMode) {
+      case 'sender':
+        title = `Send Files - ${baseTitle}`;
+        path = "/send";
+        break;
+      case 'receiver':
+        title = `Receive Files - ${baseTitle}`;
+        path = "/receive";
+        break;
+      case 'transfer':
+        title = `Transferring... - ${baseTitle}`;
+        path = "/transfer";
+        break;
+      default:
+        path = "/";
+        break;
+    }
+
+    document.title = title;
+    // Update URL without reloading page (SPA friendly)
+    if (window.location.pathname !== path) {
+      window.history.replaceState(null, "", path);
+    }
+  }, [appMode]);
+
   useEffect(() => {
     // Setup listeners
     p2pManager.onStateChange((state) => {

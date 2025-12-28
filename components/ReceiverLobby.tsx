@@ -20,7 +20,7 @@ export const ReceiverLobby: React.FC<Props> = ({ onConnect, onBack }) => {
       <div className="w-full flex justify-start mb-8">
         <button 
           onClick={onBack}
-          aria-label="Go back"
+          aria-label="Go back to home"
           className="p-2 -ml-2 text-neutral-400 hover:text-white transition-colors"
         >
           <ArrowLeft className="w-6 h-6" aria-hidden="true" />

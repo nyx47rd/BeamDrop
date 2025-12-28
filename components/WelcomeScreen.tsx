@@ -7,7 +7,7 @@ interface Props {
 
 export const WelcomeScreen: React.FC<Props> = ({ onSelectRole }) => {
 
-  // HELPER: Generates a 512x512 PNG with Black Background + White Icon
+  // HELPER: Generates a 512x512 Transparent PNG with White Icon
   const generateAssets = () => {
     const canvas = document.createElement('canvas');
     canvas.width = 512;
@@ -15,14 +15,12 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole }) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // 1. Draw Black Background (App Theme)
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(0, 0, 512, 512);
+    // CLEARED: Background is now transparent (No fillRect)
 
-    // 2. Prepare SVG Image
+    // 2. Prepare SVG Image (Added explicit width/height for better browser rendering)
     const img = new Image();
     const svgData = `
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white">
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="white">
         <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
       </svg>
     `;
@@ -30,12 +28,15 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole }) => {
     const url = URL.createObjectURL(blob);
 
     img.onload = () => {
-      // 3. Draw Icon Centered (Scale: 24px -> ~300px)
-      // Save context, translate to center, scale, draw centered
+      ctx.clearRect(0, 0, 512, 512); // Ensure clean slate
+      
+      // 3. Draw Icon Centered
+      ctx.save();
       ctx.translate(256, 256);
-      ctx.scale(15, 15); // Scale up 15x
-      ctx.translate(-12, -12); // Offset by half of viewBox (24/2)
+      ctx.scale(15, 15); // Scale up 15x to fill 512px
+      ctx.translate(-12, -12); // Offset center
       ctx.drawImage(img, 0, 0);
+      ctx.restore();
 
       // 4. Download
       const link = document.createElement('a');
@@ -106,7 +107,7 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole }) => {
         className="text-[10px] text-neutral-700 flex items-center gap-1 hover:text-white transition-colors border border-white/5 px-2 py-1 rounded bg-white/5"
       >
         <Wrench className="w-3 h-3" />
-        Dev: Generate PNG Assets
+        Dev: Generate PNG Assets (Transparent)
       </button>
 
     </div>

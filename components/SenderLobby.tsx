@@ -21,7 +21,7 @@ export const SenderLobby: React.FC<Props> = ({ code, onBack, statusMessage }) =>
       <div className="w-full flex justify-start mb-8">
         <button 
           onClick={onBack}
-          aria-label="Go back"
+          aria-label="Go back to home"
           className="p-2 -ml-2 text-neutral-400 hover:text-white transition-colors"
         >
           <ArrowLeft className="w-6 h-6" aria-hidden="true" />
@@ -36,7 +36,7 @@ export const SenderLobby: React.FC<Props> = ({ code, onBack, statusMessage }) =>
       {/* Code Display Card */}
       <button 
         onClick={copyToClipboard}
-        aria-label={copied ? "Copied" : "Copy code to clipboard"}
+        aria-label={copied ? "Code copied to clipboard" : `Copy code ${code.slice(0,3)} ${code.slice(3)} to clipboard`}
         className="relative w-full max-w-[340px] bg-[#1c1c1e] hover:bg-[#2c2c2e] border border-white/5 rounded-[2.5rem] py-16 flex flex-col items-center justify-center gap-6 group transition-all duration-300 active:scale-[0.98] mb-12 shadow-[0_0_50px_-20px_rgba(0,0,0,0.5)]"
       >
         <div className="flex items-center gap-8">
