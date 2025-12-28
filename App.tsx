@@ -1,11 +1,11 @@
-import React, { useState, useEffect, Suspense } from 'react';
+import React, { useState, useEffect, Suspense, useCallback } from 'react';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { p2pManager } from './services/p2p';
 import { deviceService } from './services/device';
 import { ConnectionState, TransferProgress } from './types';
 import { XCircle, Loader2 } from 'lucide-react';
 
-// Lazy load heavy components to improve Initial Load Time (LCP/FCP)
+// Lazy load heavy components
 const SenderLobby = React.lazy(() => import('./components/SenderLobby').then(module => ({ default: module.SenderLobby })));
 const ReceiverLobby = React.lazy(() => import('./components/ReceiverLobby').then(module => ({ default: module.ReceiverLobby })));
 const TransferPanel = React.lazy(() => import('./components/TransferPanel').then(module => ({ default: module.TransferPanel })));
@@ -13,7 +13,6 @@ const TransferPanel = React.lazy(() => import('./components/TransferPanel').then
 type AppMode = 'welcome' | 'sender' | 'receiver' | 'transfer';
 type Role = 'sender' | 'receiver' | null;
 
-// Simple loading fallback for Suspense
 const LoadingFallback = () => (
   <div className="flex flex-col items-center justify-center h-full w-full space-y-4 animate-in fade-in">
     <Loader2 className="w-8 h-8 text-white animate-spin opacity-50" />
@@ -21,8 +20,24 @@ const LoadingFallback = () => (
 );
 
 const App: React.FC = () => {
-  const [appMode, setAppMode] = useState<AppMode>('welcome');
-  const [activeRole, setActiveRole] = useState<Role>(null);
+  // Initialize state based on current URL to prevent 404/redirect loops on refresh
+  const getInitialMode = (): AppMode => {
+    const path = window.location.pathname;
+    if (path === '/send') return 'sender';
+    if (path === '/receive') return 'receiver';
+    return 'welcome';
+  };
+
+  const getInitialRole = (): Role => {
+    const path = window.location.pathname;
+    if (path === '/send') return 'sender';
+    if (path === '/receive') return 'receiver';
+    return null;
+  };
+
+  const [appMode, setAppMode] = useState<AppMode>(getInitialMode);
+  const [activeRole, setActiveRole] = useState<Role>(getInitialRole);
+  
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
   const [connectionStatus, setConnectionStatus] = useState<string>('');
   const [generatedCode, setGeneratedCode] = useState<string>('');
@@ -30,6 +45,31 @@ const App: React.FC = () => {
   const [progress, setProgress] = useState<TransferProgress | null>(null);
   const [receivedFiles, setReceivedFiles] = useState<{ blob: Blob; name: string }[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Initialize P2P if starting directly on /send
+  useEffect(() => {
+    if (appMode === 'sender' && !generatedCode) {
+       // We need to init sender if they refreshed the page
+       handleSelectRole('sender');
+    }
+    // Note: Receiver doesn't need auto-init as they need to input code
+  }, []);
+
+  // Handle Browser Back Button
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname;
+      if (path === '/' || path === '') {
+        handleDisconnect();
+      } else if (path === '/send') {
+        if (appMode !== 'sender') handleSelectRole('sender');
+      } else if (path === '/receive') {
+        if (appMode !== 'receiver') setAppMode('receiver');
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [appMode]);
 
   // SEO & UX: Dynamic Title and URL Management
   useEffect(() => {
@@ -56,14 +96,14 @@ const App: React.FC = () => {
     }
 
     document.title = title;
-    // Update URL without reloading page (SPA friendly)
+    
+    // Update URL only if it changed to avoid history spam
     if (window.location.pathname !== path) {
-      window.history.replaceState(null, "", path);
+      window.history.pushState(null, "", path);
     }
   }, [appMode]);
 
   useEffect(() => {
-    // Setup listeners
     p2pManager.onStateChange((state) => {
       setConnectionState(state);
       
@@ -106,7 +146,8 @@ const App: React.FC = () => {
     setActiveRole(role);
     
     if (role === 'sender') {
-      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      // Reuse existing code if available (e.g. from previous session not fully cleared), else generate
+      const code = generatedCode || Math.floor(100000 + Math.random() * 900000).toString();
       setGeneratedCode(code);
       p2pManager.init(code);
       setAppMode('sender');
@@ -140,7 +181,7 @@ const App: React.FC = () => {
     }
   };
 
-  const handleDisconnect = () => {
+  const handleDisconnect = useCallback(() => {
     p2pManager.cleanup();
     setAppMode('welcome');
     setActiveRole(null);
@@ -150,7 +191,7 @@ const App: React.FC = () => {
     setReceivedFiles([]);
     setErrorMsg(null);
     setGeneratedCode('');
-  };
+  }, []);
 
   const isTransfer = appMode === 'transfer';
 

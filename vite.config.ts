@@ -12,7 +12,9 @@ export default defineConfig({
         cleanupOutdatedCaches: true,
         clientsClaim: true,
         skipWaiting: true,
-        navigateFallback: null,
+        // Fix 404 on routes: Serve index.html for all navigation requests
+        navigateFallback: '/index.html',
+        navigateFallbackDenylist: [/^\/api\//], // Don't fallback for API routes if any
       },
       manifest: {
         name: 'BeamDrop P2P',
@@ -37,7 +39,7 @@ export default defineConfig({
             type: 'image/png'
           },
           {
-            src: 'favicon.png', // Ideally this should be a larger 512px image
+            src: 'favicon.png', 
             sizes: '512x512',
             type: 'image/png'
           }
