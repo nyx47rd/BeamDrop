@@ -13,9 +13,13 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 
-    <!-- Favicon Configuration -->
-    <!-- Google & Browsers: Force use of PNG for indexing consistency -->
-    <link rel="icon" type="image/png" href="/favicon.png" />
+    <!-- Favicon Strategy:
+         1. SVG: Preferred by modern browsers (Crisp, scalable).
+         2. PNG: Used by Google Search, older browsers, and as a fallback.
+         3. Apple: Used for iOS home screen.
+    -->
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="alternate icon" type="image/png" href="/favicon.png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     
     <style>
