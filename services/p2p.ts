@@ -3,11 +3,11 @@ import { signalingService } from './signaling';
 import { ConnectionState, FileMetadata, TransferProgress, BatchMetadata } from '../types';
 import { deviceService } from './device';
 
-// --- PERFORMANCE TUNING (Aggressive Mode) ---
-const CHUNK_SIZE = 256 * 1024; // Increased to 256KB for higher throughput
-const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024; // Increased to 16MB to saturate bandwidth
-const MAX_QUEUE_SIZE = 8; // Increased queue depth
-const ACK_TIMEOUT_MS = 5000; 
+// --- PERFORMANCE TUNING (Stable Aggressive Mode) ---
+const CHUNK_SIZE = 256 * 1024; // 256KB chunks
+const MAX_BUFFERED_AMOUNT = 8 * 1024 * 1024; // 8MB Buffer (High speed, but safer for mobile RAM/Network than 16MB)
+const MAX_QUEUE_SIZE = 8; 
+const ACK_TIMEOUT_MS = 60000; // Increased to 60s to prevent premature timeout on slow networks
 
 // Process 3 files concurrently
 const CONCURRENT_CHANNELS = 3;
@@ -18,7 +18,7 @@ class TransferChannel {
     public id: number;
     public channel: RTCDataChannel;
     private manager: P2PManager;
-    private worker: Worker; // Reuse worker
+    private worker: Worker;
     
     // State
     private isBusy = false;
@@ -27,6 +27,7 @@ class TransferChannel {
     
     // Flow Control
     private pendingReadRequests = 0;
+    private ackResolver: (() => void) | null = null; // Promise resolver for ACK
     
     // Receiver State
     private receivedBuffers: ArrayBuffer[] = [];
@@ -37,14 +38,13 @@ class TransferChannel {
         this.id = id;
         this.channel = channel;
         this.manager = manager;
-        // Init worker once per channel to avoid startup latency
         this.worker = createWorker();
         this.setupEvents();
     }
 
     private setupEvents() {
         this.channel.binaryType = 'arraybuffer';
-        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE * 2; // Trigger pump earlier
+        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE * 2;
 
         this.channel.onopen = () => {
             console.log(`[Channel ${this.id}] Open`);
@@ -56,6 +56,8 @@ class TransferChannel {
             console.log(`[Channel ${this.id}] Closed`);
             this.cleanup();
         };
+        
+        // Single unified message handler to prevent race conditions
         this.channel.onmessage = (event) => this.handleMessage(event);
     }
 
@@ -77,12 +79,11 @@ class TransferChannel {
             await this.sendFileLogic(file);
         } catch (e) {
             console.error(`[Channel ${this.id}] Send Error (skipped file):`, e);
-            // Even on error, we might want to count it as "processed" to unblock the batch
+            // Even on error, ensure we mark complete so UI doesn't hang
             this.manager.markSenderFileComplete(); 
         } finally {
             this.isBusy = false;
             this.currentFile = null;
-            // Immediate recursive call instead of setTimeout for tighter loop
             this.processQueue(); 
         }
     }
@@ -100,7 +101,7 @@ class TransferChannel {
         return new Promise<void>((resolve, reject) => {
             let fileOffset = 0;
             this.pendingReadRequests = 0;
-            const worker = this.worker; // Use class instance worker
+            const worker = this.worker;
 
             const pump = () => {
                 if (this.channel.readyState !== 'open') {
@@ -108,12 +109,10 @@ class TransferChannel {
                     return;
                 }
 
-                // BACKPRESSURE
                 if (this.channel.bufferedAmount > MAX_BUFFERED_AMOUNT || this.pendingReadRequests >= MAX_QUEUE_SIZE) {
                     return; 
                 }
 
-                // Fill Pipeline
                 while (
                     fileOffset < file.size && 
                     this.pendingReadRequests < MAX_QUEUE_SIZE &&
@@ -133,7 +132,6 @@ class TransferChannel {
 
             this.channel.onbufferedamountlow = () => pump();
 
-            // Set up one-time listener for this file transfer
             const messageHandler = async (e: MessageEvent) => {
                 if (e.data.type === 'error') {
                     worker.removeEventListener('message', messageHandler);
@@ -153,9 +151,15 @@ class TransferChannel {
                             worker.removeEventListener('message', messageHandler);
                             this.channel.onbufferedamountlow = null;
                             
+                            // 1. Wait for browser buffer to empty (OS takes over)
                             await this.waitForDrain();
+                            
+                            // 2. Send End Marker
                             this.channel.send(JSON.stringify({ type: 'file-end' }));
-                            await this.waitForAckOrTimeout();
+                            
+                            // 3. CRITICAL: Wait for Receiver to say "I have the full file"
+                            // If we resolve too early, the sender UI says "Done" while receiver is still processing.
+                            await this.waitForAck();
                             
                             this.manager.markSenderFileComplete();
                             resolve();
@@ -182,39 +186,22 @@ class TransferChannel {
                     clearInterval(check);
                     resolve();
                 }
-            }, 10); // Faster check interval
+            }, 10);
         });
     }
 
-    private waitForAckOrTimeout(): Promise<void> {
+    private waitForAck(): Promise<void> {
         return new Promise(resolve => {
-            let solved = false;
-            const originalHandler = this.channel.onmessage;
+            this.ackResolver = resolve;
             
-            const timeout = setTimeout(() => {
-                if (!solved) {
-                    solved = true;
-                    this.channel.onmessage = originalHandler;
-                    resolve();
+            // Fallback timeout only if network completely dies
+            setTimeout(() => {
+                if (this.ackResolver) {
+                    console.warn(`[Channel ${this.id}] ACK Timeout - Forcing continue`);
+                    this.ackResolver();
+                    this.ackResolver = null;
                 }
             }, ACK_TIMEOUT_MS);
-
-            const ackHandler = (event: MessageEvent) => {
-                if (typeof event.data === 'string') {
-                    try {
-                        const msg = JSON.parse(event.data);
-                        if (msg.type === 'ack-finish') {
-                            if (!solved) {
-                                solved = true;
-                                clearTimeout(timeout);
-                                this.channel.onmessage = originalHandler;
-                                resolve();
-                            }
-                        }
-                    } catch(e) {}
-                }
-            };
-            this.channel.onmessage = ackHandler;
         });
     }
 
@@ -240,9 +227,17 @@ class TransferChannel {
         else if (msg.type === 'file-end') {
             if (this.currentMeta) {
                 this.finishFile(this.currentMeta);
+                // Send ACK immediately after rebuilding blob
                 try {
                     this.channel.send(JSON.stringify({ type: 'ack-finish' }));
                 } catch(e) {}
+            }
+        }
+        else if (msg.type === 'ack-finish') {
+            // SENDER SIDE: Receiver confirmed receipt
+            if (this.ackResolver) {
+                this.ackResolver();
+                this.ackResolver = null;
             }
         }
     }
@@ -267,6 +262,7 @@ class TransferChannel {
         if (this.worker) this.worker.terminate();
         this.receivedBuffers = [];
         this.fileQueue = [];
+        if (this.ackResolver) this.ackResolver(); // Unblock any pending awaits
     }
 }
 
@@ -277,7 +273,6 @@ export class P2PManager {
   private myId: string = Math.random().toString(36).substr(2, 9);
   private connectionState: ConnectionState = 'idle';
   
-  // Callbacks
   private stateChangeCallback: ((state: ConnectionState) => void) | null = null;
   private progressCallback: ((progress: TransferProgress) => void) | null = null;
   private fileReceivedCallback: ((file: Blob, meta: FileMetadata) => void) | null = null;
@@ -286,7 +281,6 @@ export class P2PManager {
   private announceInterval: any = null;
   private iceCandidateQueue: RTCIceCandidateInit[] = [];
 
-  // Batch State
   private batchState = {
     totalFiles: 0,
     totalSize: 0,
@@ -324,7 +318,6 @@ export class P2PManager {
       };
 
       const batchMeta: BatchMetadata = { totalFiles: files.length, totalSize };
-      // Broadcast batch info
       this.channels.forEach(ch => {
           if(ch.channel.readyState === 'open') ch.channel.send(JSON.stringify({ type: 'batch-info', batchMeta }));
       });
@@ -370,8 +363,6 @@ export class P2PManager {
 
   public updateProgress(bytesAdded: number) {
       this.batchState.transferredBytes += bytesAdded;
-      
-      // Safety Cap: Don't exceed total size
       if (this.batchState.transferredBytes > this.batchState.totalSize) {
           this.batchState.transferredBytes = this.batchState.totalSize;
       }
@@ -383,13 +374,10 @@ export class P2PManager {
       }
   }
 
-  // Called by Sender when ACK is received
   public markSenderFileComplete() {
       this.batchState.completedFilesCount++;
-      // If we are done, force total transferred bytes to equal total size (fix floating point issues)
       if (this.batchState.completedFilesCount === this.batchState.totalFiles) {
           this.batchState.transferredBytes = this.batchState.totalSize;
-          // NOTIFICATION FIX: Only send notification when ALL files are done
           const msg = this.batchState.totalFiles === 1 
             ? "File Sent Successfully" 
             : `All ${this.batchState.totalFiles} Files Sent`;
@@ -398,14 +386,12 @@ export class P2PManager {
       this.emitProgress();
   }
 
-  // Called by Receiver when file is built
   public handleReceiverFileComplete(blob: Blob, meta: FileMetadata) {
       this.batchState.completedFilesCount++;
       if (this.fileReceivedCallback) {
           this.fileReceivedCallback(blob, meta);
       }
       if (this.batchState.completedFilesCount >= this.batchState.totalFiles) {
-          // NOTIFICATION FIX: Only send notification when ALL files are done
           deviceService.sendNotification('Transfer Complete', `All ${this.batchState.totalFiles} files received`);
       }
       this.emitProgress();
@@ -421,7 +407,6 @@ export class P2PManager {
           ? `${(speed / (1024 * 1024)).toFixed(1)} MB/s` 
           : `${(speed / 1024).toFixed(0)} KB/s`;
 
-      // --- ETA CALCULATION ---
       const remainingBytes = this.batchState.totalSize - this.batchState.transferredBytes;
       let etaStr = '';
       if (remainingBytes <= 0) {
@@ -458,7 +443,6 @@ export class P2PManager {
       });
   }
 
-  // --- WEBRTC BOILERPLATE ---
   private log(message: string) {
     console.log(`[P2P] ${message}`);
     if (this.logCallback) this.logCallback(message);
