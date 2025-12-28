@@ -4,36 +4,41 @@ import { ConnectionState, FileMetadata, TransferProgress, BatchMetadata } from '
 import { deviceService } from './device';
 import { openDB, IDBPDatabase } from 'idb';
 
-// --- PERFORMANCE TUNING (Turbo Pipeline Mode) ---
-// CHUNK_SIZE & BUFFER maintained as requested for compatibility
-const CHUNK_SIZE = 256 * 1024; // 256KB
-const MAX_BUFFERED_AMOUNT = 8 * 1024 * 1024; // 8MB Network Buffer
+// --- PERFORMANCE TUNING (Chaos Mode: Unordered + Pipeline) ---
+const CHUNK_SIZE = 256 * 1024; // 256KB Payload
+const HEADER_SIZE = 4; // 4 Bytes for Sequence Index (Uint32)
+const PACKET_SIZE = CHUNK_SIZE + HEADER_SIZE; 
 
-// INCREASED: Prefetch 25 chunks (~6MB) in parallel while sending.
-// This keeps the pipe 100% full, processing multiple chunks ahead of time.
-const MAX_QUEUE_SIZE = 25; 
+const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024; // Increased to 16MB for high throughput
+
+// Aggressive Prefetching
+const MAX_QUEUE_SIZE = 40; 
 
 const ACK_TIMEOUT_MS = 60000;
 const CONCURRENT_CHANNELS = 3; 
 
-// Threshold to switch from RAM to IndexedDB (150MB)
+// RAM Threshold
 const RAM_THRESHOLD = 150 * 1024 * 1024;
 
-// INCREASED: Write to disk only after ~12.5MB accumulates.
-// Fewer DB transactions = Massive speed boost on receiving end.
+// Batch Write Size
 const IDB_BATCH_SIZE = 50; 
+
+// Sync Interval
+const SYNC_INTERVAL_MS = 200;
 
 const createWorker = () => new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
 
-// --- STORAGE ENGINE (RAM vs IDB with Batch Optimization) ---
+// --- STORAGE ENGINE (Smart Reassembly) ---
 class ChunkStore {
     private useDB: boolean;
-    private ramChunks: ArrayBuffer[] = [];
     
-    // IDB specific
+    // RAM Storage: Stores objects { index, data } then sorts on finish
+    private ramChunks: { index: number, data: ArrayBuffer }[] = [];
+    
+    // IDB Specific
     private dbName: string | null = null;
     private db: IDBPDatabase | null = null;
-    private writeQueue: ArrayBuffer[] = []; // Temporary RAM buffer for batching
+    private writeQueue: { index: number, data: ArrayBuffer }[] = []; 
     
     private fileName: string;
     private fileType: string;
@@ -49,61 +54,56 @@ class ChunkStore {
             this.dbName = `beamdrop_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
             this.db = await openDB(this.dbName, 1, {
                 upgrade(db) {
-                    db.createObjectStore('chunks', { keyPath: 'id', autoIncrement: true });
+                    // Critical: Use 'index' as keyPath to allow auto-sorting by IDB
+                    db.createObjectStore('chunks', { keyPath: 'index' });
                 },
             });
         }
     }
 
-    async addChunk(chunk: ArrayBuffer) {
+    async addChunk(index: number, chunk: ArrayBuffer) {
         if (this.useDB && this.db) {
-            // Add to fast memory queue first
-            this.writeQueue.push(chunk);
-
-            // Only flush to disk when we hit the optimized batch size
+            this.writeQueue.push({ index, data: chunk });
             if (this.writeQueue.length >= IDB_BATCH_SIZE) {
                 await this.flushQueue();
             }
         } else {
-            this.ramChunks.push(chunk);
+            this.ramChunks.push({ index, data: chunk });
         }
     }
 
-    // Writes accumulated chunks to IDB in a single transaction
     private async flushQueue() {
         if (this.writeQueue.length === 0 || !this.db) return;
-
-        // Create transaction only when necessary
         const tx = this.db.transaction('chunks', 'readwrite');
         const store = tx.objectStore('chunks');
         
-        // Parallelize the add operations within the transaction
-        const promises = this.writeQueue.map(data => store.add({ data }));
-        this.writeQueue = []; // Clear queue immediately to free RAM
-        
+        // Batch add
+        const promises = this.writeQueue.map(item => store.put(item)); // put handles updates/inserts
+        this.writeQueue = []; 
         await Promise.all(promises);
         await tx.done;
     }
 
     async finish(): Promise<Blob> {
         if (this.useDB && this.db) {
-            // Ensure any remaining items in queue are written
             await this.flushQueue();
-
-            // Reassemble from IDB
             const tx = this.db.transaction('chunks', 'readonly');
             const store = tx.objectStore('chunks');
-            const allChunks = await store.getAll();
+            
+            // IDB 'getAll' returns items sorted by key (index) automatically!
+            const allChunks = await store.getAll(); 
             const blobs = allChunks.map(c => c.data);
             const blob = new Blob(blobs, { type: this.fileType });
             
-            // Clean up DB immediately
             this.db.close();
             await window.indexedDB.deleteDatabase(this.dbName!);
             return blob;
         } else {
-            const blob = new Blob(this.ramChunks, { type: this.fileType });
-            this.ramChunks = []; // GC
+            // RAM Sort
+            this.ramChunks.sort((a, b) => a.index - b.index);
+            const blobs = this.ramChunks.map(c => c.data);
+            const blob = new Blob(blobs, { type: this.fileType });
+            this.ramChunks = []; 
             return blob;
         }
     }
@@ -124,16 +124,13 @@ class TransferChannel {
     private manager: P2PManager;
     private worker: Worker;
     
-    // State
     private isBusy = false;
     private fileQueue: File[] = [];
     private currentFile: File | null = null;
     
-    // Flow Control
     private pendingReadRequests = 0;
     private ackResolver: (() => void) | null = null;
     
-    // Receiver State
     private receivedSize = 0;
     private currentMeta: FileMetadata | null = null;
     private chunkStore: ChunkStore | null = null;
@@ -148,11 +145,10 @@ class TransferChannel {
 
     private setupEvents() {
         this.channel.binaryType = 'arraybuffer';
-        // Notify when buffer is half empty to keep pumping
-        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE * 4; 
+        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE * 5; 
 
         this.channel.onopen = () => {
-            console.log(`[Channel ${this.id}] Open`);
+            console.log(`[Channel ${this.id}] Open (Unordered)`);
             this.manager.checkConnectionState();
             this.processQueue();
         };
@@ -206,19 +202,16 @@ class TransferChannel {
             this.pendingReadRequests = 0;
             const worker = this.worker;
 
-            // The Pump: Keeps the worker busy with MAX_QUEUE_SIZE chunks
             const pump = () => {
                 if (this.channel.readyState !== 'open') {
                     reject(new Error("Channel closed"));
                     return;
                 }
 
-                // Stop if network buffer is full or queue is full
                 if (this.channel.bufferedAmount > MAX_BUFFERED_AMOUNT || this.pendingReadRequests >= MAX_QUEUE_SIZE) {
                     return; 
                 }
 
-                // Fill the pipeline!
                 while (
                     fileOffset < file.size && 
                     this.pendingReadRequests < MAX_QUEUE_SIZE &&
@@ -246,13 +239,32 @@ class TransferChannel {
                 }
 
                 if (e.data.type === 'chunk_ready') {
-                    const { buffer, eof } = e.data;
+                    const { buffer, eof, offset } = e.data;
                     this.pendingReadRequests--;
 
                     try {
-                        // Send data immediately
-                        this.channel.send(buffer);
-                        this.manager.updateProgress(buffer.byteLength);
+                        // -----------------------------------------------------
+                        // HEADER INJECTION (The Secret Sauce)
+                        // We wrap the chunk with a 4-byte index so it can
+                        // travel out-of-order and be reassembled later.
+                        // -----------------------------------------------------
+                        const chunkIndex = Math.floor((offset - buffer.byteLength) / CHUNK_SIZE);
+                        
+                        // Create a new buffer: Header (4 bytes) + Data
+                        const packet = new Uint8Array(HEADER_SIZE + buffer.byteLength);
+                        const view = new DataView(packet.buffer);
+                        
+                        // Write Index
+                        view.setUint32(0, chunkIndex); 
+                        
+                        // Write Data
+                        packet.set(new Uint8Array(buffer), HEADER_SIZE);
+
+                        // Send the wrapped packet
+                        this.channel.send(packet);
+                        
+                        // Sync logic remains same
+                        // this.manager.updateProgress(buffer.byteLength); 
 
                         if (eof) {
                             worker.removeEventListener('message', messageHandler);
@@ -265,7 +277,6 @@ class TransferChannel {
                             this.manager.markSenderFileComplete();
                             resolve();
                         } else {
-                            // Immediately try to fill the queue again
                             pump();
                         }
                     } catch (err) {
@@ -276,7 +287,6 @@ class TransferChannel {
             };
 
             worker.addEventListener('message', messageHandler);
-            // Start the pipeline
             pump();
         });
     }
@@ -321,12 +331,12 @@ class TransferChannel {
         else if (msg.type === 'file-start') {
             this.currentMeta = msg.metadata;
             this.receivedSize = 0;
-            
-            // Initialize Storage Engine (RAM or IDB)
             this.chunkStore = new ChunkStore(msg.metadata.name, msg.metadata.size, msg.metadata.type);
             await this.chunkStore.init();
-            
             this.manager.notifyFileStart(msg.metadata.name);
+        }
+        else if (msg.type === 'progress-sync') {
+            this.manager.syncProgress(msg.bytes, msg.fileName);
         }
         else if (msg.type === 'file-end') {
             if (this.currentMeta && this.chunkStore) {
@@ -347,9 +357,20 @@ class TransferChannel {
     private async handleBinaryData(buffer: ArrayBuffer) {
         if (!this.currentMeta || !this.chunkStore) return;
         
-        await this.chunkStore.addChunk(buffer);
-        this.receivedSize += buffer.byteLength;
-        this.manager.updateProgress(buffer.byteLength);
+        // -----------------------------------------------------
+        // UNWRAP PACKET
+        // Read header to find where this chunk belongs
+        // -----------------------------------------------------
+        const view = new DataView(buffer);
+        const index = view.getUint32(0); // Read 4-byte header
+        
+        // Extract actual data (skip first 4 bytes)
+        const data = buffer.slice(HEADER_SIZE);
+        
+        await this.chunkStore.addChunk(index, data);
+        this.receivedSize += data.byteLength;
+        
+        this.manager.updateProgress(data.byteLength);
     }
 
     private async finishFile(meta: FileMetadata) {
@@ -372,7 +393,7 @@ class TransferChannel {
 
 export class P2PManager {
   private peerConnection: RTCPeerConnection | null = null;
-  private channels: TransferChannel[] = [];
+  public channels: TransferChannel[] = []; 
   
   private myId: string = Math.random().toString(36).substr(2, 9);
   private connectionState: ConnectionState = 'idle';
@@ -395,6 +416,7 @@ export class P2PManager {
   };
   
   private lastProgressEmit = 0;
+  private lastSyncEmit = 0;
 
   constructor() {
     this.handleSignal = this.handleSignal.bind(this);
@@ -476,6 +498,35 @@ export class P2PManager {
           this.emitProgress();
           this.lastProgressEmit = now;
       }
+
+      if (now - this.lastSyncEmit > SYNC_INTERVAL_MS) {
+          this.sendSyncMessage();
+          this.lastSyncEmit = now;
+      }
+  }
+
+  private sendSyncMessage() {
+      const activeChannel = this.channels.find(c => c.channel.readyState === 'open');
+      if (activeChannel) {
+          try {
+            activeChannel.channel.send(JSON.stringify({
+                type: 'progress-sync',
+                bytes: this.batchState.transferredBytes,
+                fileName: this.batchState.currentFileName
+            }));
+          } catch(e) {}
+      }
+  }
+
+  public syncProgress(totalBytesReceived: number, currentFileName?: string) {
+      this.batchState.transferredBytes = totalBytesReceived;
+      if (currentFileName) this.batchState.currentFileName = currentFileName;
+      
+      if (this.batchState.transferredBytes > this.batchState.totalSize) {
+          this.batchState.transferredBytes = this.batchState.totalSize;
+      }
+      
+      this.emitProgress();
   }
 
   public markSenderFileComplete() {
@@ -492,6 +543,7 @@ export class P2PManager {
 
   public handleReceiverFileComplete(blob: Blob, meta: FileMetadata) {
       this.batchState.completedFilesCount++;
+      this.sendSyncMessage();
       if (this.fileReceivedCallback) {
           this.fileReceivedCallback(blob, meta);
       }
@@ -633,7 +685,8 @@ export class P2PManager {
             const pc = this.createPeerConnection();
 
             for (let i = 0; i < CONCURRENT_CHANNELS; i++) {
-                const dc = pc.createDataChannel(`beam_${i}`, { ordered: true });
+                // IMPORTANT: ordered: false is the key to Unordered Delivery
+                const dc = pc.createDataChannel(`beam_${i}`, { ordered: false });
                 const handler = new TransferChannel(i, dc, this);
                 this.channels.push(handler);
             }
