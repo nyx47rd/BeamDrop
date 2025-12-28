@@ -2,17 +2,84 @@
 import { signalingService } from './signaling';
 import { ConnectionState, FileMetadata, TransferProgress, BatchMetadata } from '../types';
 import { deviceService } from './device';
+import { openDB, IDBPDatabase } from 'idb';
 
-// --- PERFORMANCE TUNING (Stable Aggressive Mode) ---
-const CHUNK_SIZE = 256 * 1024; // 256KB chunks
-const MAX_BUFFERED_AMOUNT = 8 * 1024 * 1024; // 8MB Buffer (High speed, but safer for mobile RAM/Network than 16MB)
-const MAX_QUEUE_SIZE = 8; 
-const ACK_TIMEOUT_MS = 60000; // Increased to 60s to prevent premature timeout on slow networks
+// --- PERFORMANCE TUNING (Ultra-Stable Mode) ---
+// 64KB is the sweet spot for Chrome/WebRTC. Larger chunks (256KB) can cause fragmentation and jitter.
+const CHUNK_SIZE = 64 * 1024; 
+const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024; // 16MB Buffer
+const MAX_QUEUE_SIZE = 16; // Increased queue depth for smaller chunks
+const ACK_TIMEOUT_MS = 60000;
+const CONCURRENT_CHANNELS = 3; // Keep concurrent channels for parallel throughput
 
-// Process 3 files concurrently
-const CONCURRENT_CHANNELS = 3;
+// Threshold to switch from RAM to IndexedDB (200MB)
+// Files smaller than this use RAM (Faster), larger use Disk (Stable)
+const RAM_THRESHOLD = 200 * 1024 * 1024;
 
 const createWorker = () => new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
+
+// --- STORAGE ENGINE (RAM vs IDB) ---
+class ChunkStore {
+    private useDB: boolean;
+    private ramChunks: ArrayBuffer[] = [];
+    private dbName: string | null = null;
+    private db: IDBPDatabase | null = null;
+    private fileName: string;
+    private fileType: string;
+
+    constructor(fileName: string, fileSize: number, fileType: string) {
+        this.fileName = fileName;
+        this.fileType = fileType;
+        this.useDB = fileSize > RAM_THRESHOLD;
+    }
+
+    async init() {
+        if (this.useDB) {
+            this.dbName = `beamdrop_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+            this.db = await openDB(this.dbName, 1, {
+                upgrade(db) {
+                    db.createObjectStore('chunks', { keyPath: 'id', autoIncrement: true });
+                },
+            });
+        }
+    }
+
+    async addChunk(chunk: ArrayBuffer) {
+        if (this.useDB && this.db) {
+            await this.db.add('chunks', { data: chunk });
+        } else {
+            this.ramChunks.push(chunk);
+        }
+    }
+
+    async finish(): Promise<Blob> {
+        if (this.useDB && this.db) {
+            // Reassemble from IDB
+            const tx = this.db.transaction('chunks', 'readonly');
+            const store = tx.objectStore('chunks');
+            const allChunks = await store.getAll();
+            const blobs = allChunks.map(c => c.data);
+            const blob = new Blob(blobs, { type: this.fileType });
+            
+            // Clean up DB immediately
+            this.db.close();
+            await window.indexedDB.deleteDatabase(this.dbName!);
+            return blob;
+        } else {
+            const blob = new Blob(this.ramChunks, { type: this.fileType });
+            this.ramChunks = []; // GC
+            return blob;
+        }
+    }
+
+    async cleanup() {
+        this.ramChunks = [];
+        if (this.db) {
+            this.db.close();
+            if (this.dbName) await window.indexedDB.deleteDatabase(this.dbName);
+        }
+    }
+}
 
 class TransferChannel {
     public id: number;
@@ -27,12 +94,12 @@ class TransferChannel {
     
     // Flow Control
     private pendingReadRequests = 0;
-    private ackResolver: (() => void) | null = null; // Promise resolver for ACK
+    private ackResolver: (() => void) | null = null;
     
     // Receiver State
-    private receivedBuffers: ArrayBuffer[] = [];
     private receivedSize = 0;
     private currentMeta: FileMetadata | null = null;
+    private chunkStore: ChunkStore | null = null;
     
     constructor(id: number, channel: RTCDataChannel, manager: P2PManager) {
         this.id = id;
@@ -44,7 +111,7 @@ class TransferChannel {
 
     private setupEvents() {
         this.channel.binaryType = 'arraybuffer';
-        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE * 2;
+        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE * 4; // Notify earlier to keep pipe full
 
         this.channel.onopen = () => {
             console.log(`[Channel ${this.id}] Open`);
@@ -57,7 +124,6 @@ class TransferChannel {
             this.cleanup();
         };
         
-        // Single unified message handler to prevent race conditions
         this.channel.onmessage = (event) => this.handleMessage(event);
     }
 
@@ -78,8 +144,7 @@ class TransferChannel {
         try {
             await this.sendFileLogic(file);
         } catch (e) {
-            console.error(`[Channel ${this.id}] Send Error (skipped file):`, e);
-            // Even on error, ensure we mark complete so UI doesn't hang
+            console.error(`[Channel ${this.id}] Send Error:`, e);
             this.manager.markSenderFileComplete(); 
         } finally {
             this.isBusy = false;
@@ -151,14 +216,8 @@ class TransferChannel {
                             worker.removeEventListener('message', messageHandler);
                             this.channel.onbufferedamountlow = null;
                             
-                            // 1. Wait for browser buffer to empty (OS takes over)
                             await this.waitForDrain();
-                            
-                            // 2. Send End Marker
                             this.channel.send(JSON.stringify({ type: 'file-end' }));
-                            
-                            // 3. CRITICAL: Wait for Receiver to say "I have the full file"
-                            // If we resolve too early, the sender UI says "Done" while receiver is still processing.
                             await this.waitForAck();
                             
                             this.manager.markSenderFileComplete();
@@ -186,18 +245,15 @@ class TransferChannel {
                     clearInterval(check);
                     resolve();
                 }
-            }, 10);
+            }, 5); // 5ms check for tighter control
         });
     }
 
     private waitForAck(): Promise<void> {
         return new Promise(resolve => {
             this.ackResolver = resolve;
-            
-            // Fallback timeout only if network completely dies
             setTimeout(() => {
                 if (this.ackResolver) {
-                    console.warn(`[Channel ${this.id}] ACK Timeout - Forcing continue`);
                     this.ackResolver();
                     this.ackResolver = null;
                 }
@@ -214,27 +270,29 @@ class TransferChannel {
         }
     }
 
-    private handleControlMessage(msg: any) {
+    private async handleControlMessage(msg: any) {
         if (msg.type === 'batch-info') {
             this.manager.handleBatchInfo(msg.batchMeta);
         }
         else if (msg.type === 'file-start') {
             this.currentMeta = msg.metadata;
-            this.receivedBuffers = [];
             this.receivedSize = 0;
+            
+            // Initialize Storage Engine (RAM or IDB)
+            this.chunkStore = new ChunkStore(msg.metadata.name, msg.metadata.size, msg.metadata.type);
+            await this.chunkStore.init();
+            
             this.manager.notifyFileStart(msg.metadata.name);
         }
         else if (msg.type === 'file-end') {
-            if (this.currentMeta) {
-                this.finishFile(this.currentMeta);
-                // Send ACK immediately after rebuilding blob
+            if (this.currentMeta && this.chunkStore) {
+                await this.finishFile(this.currentMeta);
                 try {
                     this.channel.send(JSON.stringify({ type: 'ack-finish' }));
                 } catch(e) {}
             }
         }
         else if (msg.type === 'ack-finish') {
-            // SENDER SIDE: Receiver confirmed receipt
             if (this.ackResolver) {
                 this.ackResolver();
                 this.ackResolver = null;
@@ -242,17 +300,19 @@ class TransferChannel {
         }
     }
 
-    private handleBinaryData(buffer: ArrayBuffer) {
-        if (!this.currentMeta) return;
-        this.receivedBuffers.push(buffer);
+    private async handleBinaryData(buffer: ArrayBuffer) {
+        if (!this.currentMeta || !this.chunkStore) return;
+        
+        await this.chunkStore.addChunk(buffer);
         this.receivedSize += buffer.byteLength;
         this.manager.updateProgress(buffer.byteLength);
     }
 
-    private finishFile(meta: FileMetadata) {
-        const blob = new Blob(this.receivedBuffers, { type: meta.type });
+    private async finishFile(meta: FileMetadata) {
+        if (!this.chunkStore) return;
+        const blob = await this.chunkStore.finish();
         this.manager.handleReceiverFileComplete(blob, meta);
-        this.receivedBuffers = [];
+        this.chunkStore = null;
         this.currentMeta = null;
         this.receivedSize = 0;
     }
@@ -260,9 +320,9 @@ class TransferChannel {
     public cleanup() {
         if (this.channel) this.channel.close();
         if (this.worker) this.worker.terminate();
-        this.receivedBuffers = [];
+        if (this.chunkStore) this.chunkStore.cleanup();
         this.fileQueue = [];
-        if (this.ackResolver) this.ackResolver(); // Unblock any pending awaits
+        if (this.ackResolver) this.ackResolver();
     }
 }
 

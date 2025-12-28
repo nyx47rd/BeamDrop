@@ -50,7 +50,21 @@ const App: React.FC = () => {
 
   // Discovery State
   const [lanPeers, setLanPeers] = useState<Peer[]>([]);
+  // pendingInvite is kept in state only for manual invites if we ever revert, 
+  // but for now it will largely be bypassed by auto-accept.
   const [pendingInvite, setPendingInvite] = useState<Invite | null>(null);
+
+  // Helper to instantly join a room (Auto-Accept Logic)
+  const joinRoomImmediately = (invite: Invite) => {
+      // 1. Init Receiver Mode with the room ID from invite
+      setActiveRole('receiver');
+      setAppMode('receiver');
+      setConnectionStatus('Connecting to ' + invite.fromName + '...');
+      p2pManager.init(invite.roomId);
+      
+      // Clear any pending state just in case
+      setPendingInvite(null);
+  };
 
   // Initialize P2P if starting directly on /send
   useEffect(() => {
@@ -83,11 +97,12 @@ const App: React.FC = () => {
         discoveryService.init(
             (peers) => setLanPeers(peers),
             (invite) => {
-                // If we are already doing something, ignore or queue? 
-                // For simplicity, only accept invites in welcome screen or idle
+                // AUTO-ACCEPT IMPLEMENTATION
                 if (appMode === 'welcome') {
-                    setPendingInvite(invite);
-                    deviceService.sendNotification("Incoming Connection", `${invite.fromName} wants to share files`);
+                    console.log("Auto-accepting invite from:", invite.fromName);
+                    // Instead of setting pendingInvite (which shows modal), we join immediately
+                    joinRoomImmediately(invite);
+                    deviceService.sendNotification("Connected", `Joined ${invite.fromName}`);
                 }
             }
         );
@@ -192,12 +207,7 @@ const App: React.FC = () => {
 
   const handleSendFiles = async (files: File[]) => {
     try {
-      // Use the batch processing method
       await p2pManager.sendFiles(files);
-      
-      // Removed premature notification call here. 
-      // P2PManager now handles the notification when transfer is actually complete.
-
     } catch (e) {
       console.error(e);
       setErrorMsg("Failed to send files");
@@ -232,16 +242,10 @@ const App: React.FC = () => {
       discoveryService.sendInvite(peer.id, code);
   };
 
+  // Kept for manual flow fallback if needed
   const handleAcceptInvite = () => {
       if (!pendingInvite) return;
-      
-      // 1. Init Receiver Mode with the room ID from invite
-      setActiveRole('receiver');
-      setAppMode('receiver');
-      setConnectionStatus('Connecting to ' + pendingInvite.fromName + '...');
-      p2pManager.init(pendingInvite.roomId);
-      
-      setPendingInvite(null);
+      joinRoomImmediately(pendingInvite);
   };
 
   const isTransfer = appMode === 'transfer';
@@ -260,7 +264,7 @@ const App: React.FC = () => {
             </div>
           )}
 
-          {/* Invite Modal */}
+          {/* Invite Modal - Only shows if pendingInvite is set (Manual Mode or Fallback) */}
           {pendingInvite && (
               <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in">
                   <div className="w-full max-w-sm bg-[#1c1c1e] border border-white/10 rounded-[2rem] p-6 shadow-2xl space-y-6">
