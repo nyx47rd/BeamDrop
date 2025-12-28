@@ -24,8 +24,6 @@ const formatBytes = (bytes: number, decimals = 2) => {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 };
 
-// --- ISOLATED COMPONENTS TO PREVENT RE-RENDERS ---
-
 // 1. Unified Batch Progress Bar Component
 const ProgressBar = memo(({ progress }: { progress: TransferProgress | null }) => {
   if (!progress) return null;
@@ -43,12 +41,12 @@ const ProgressBar = memo(({ progress }: { progress: TransferProgress | null }) =
             <div className="flex items-center gap-2">
                 <FileStack className="w-4 h-4 text-white" />
                 <span className="text-lg font-bold text-white tracking-tight">
-                    {/* Fixed Logic: Ensure index never exceeds total */}
+                    {/* Display clamping is now handled in P2PManager, but safe guard here too */}
                     Files {Math.min(progress.currentFileIndex, progress.totalFiles)} <span className="text-neutral-500 text-base font-normal">of {progress.totalFiles}</span>
                 </span>
             </div>
             <span className="text-xs text-neutral-400 truncate max-w-[200px]">
-                Active: <span className="text-white">{progress.fileName}</span>
+                {progress.isComplete ? 'Complete' : `Active: ${progress.fileName}`}
             </span>
         </div>
         <div className="flex flex-col items-end">
@@ -66,7 +64,7 @@ const ProgressBar = memo(({ progress }: { progress: TransferProgress | null }) =
 
       <div className="flex justify-between items-center text-[10px] uppercase tracking-wider font-medium text-neutral-500">
           <span>{formatBytes(progress.transferredBatchBytes)} / {formatBytes(progress.totalBatchBytes)}</span>
-          <span>{progress.isComplete ? 'Complete' : 'Transferring'}</span>
+          <span>{progress.isComplete ? 'All Files Sent' : 'Transferring...'}</span>
       </div>
     </div>
   );
@@ -165,23 +163,6 @@ export const TransferPanel: React.FC<Props> = ({
       });
     }
   }, [receivedFiles.length, role]);
-
-  useEffect(() => {
-      deviceService.enableWakeLock();
-      const enableOnInteraction = () => {
-          deviceService.enableWakeLock();
-          document.removeEventListener('click', enableOnInteraction);
-          document.removeEventListener('touchstart', enableOnInteraction);
-      };
-      
-      document.addEventListener('click', enableOnInteraction);
-      document.addEventListener('touchstart', enableOnInteraction);
-
-      return () => {
-          document.removeEventListener('click', enableOnInteraction);
-          document.removeEventListener('touchstart', enableOnInteraction);
-      };
-  }, []);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
