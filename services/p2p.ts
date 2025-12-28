@@ -4,20 +4,24 @@ import { ConnectionState, FileMetadata, TransferProgress, BatchMetadata } from '
 import { deviceService } from './device';
 import { openDB, IDBPDatabase } from 'idb';
 
-// --- PERFORMANCE TUNING (Compatibility Mode) ---
-// Reverted settings based on user feedback for maximum stability
+// --- PERFORMANCE TUNING (Turbo Pipeline Mode) ---
+// CHUNK_SIZE & BUFFER maintained as requested for compatibility
 const CHUNK_SIZE = 256 * 1024; // 256KB
-const MAX_BUFFERED_AMOUNT = 8 * 1024 * 1024; // 8MB Buffer
-const MAX_QUEUE_SIZE = 8; 
+const MAX_BUFFERED_AMOUNT = 8 * 1024 * 1024; // 8MB Network Buffer
+
+// INCREASED: Prefetch 25 chunks (~6MB) in parallel while sending.
+// This keeps the pipe 100% full, processing multiple chunks ahead of time.
+const MAX_QUEUE_SIZE = 25; 
+
 const ACK_TIMEOUT_MS = 60000;
 const CONCURRENT_CHANNELS = 3; 
 
 // Threshold to switch from RAM to IndexedDB (150MB)
 const RAM_THRESHOLD = 150 * 1024 * 1024;
 
-// Optimized Write Batch Size for IDB (Write to disk every ~2.5MB)
-// Reducing transaction overhead significantly speeds up transfer.
-const IDB_BATCH_SIZE = 10; 
+// INCREASED: Write to disk only after ~12.5MB accumulates.
+// Fewer DB transactions = Massive speed boost on receiving end.
+const IDB_BATCH_SIZE = 50; 
 
 const createWorker = () => new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
 
@@ -56,7 +60,7 @@ class ChunkStore {
             // Add to fast memory queue first
             this.writeQueue.push(chunk);
 
-            // Only flush to disk when we hit the batch size
+            // Only flush to disk when we hit the optimized batch size
             if (this.writeQueue.length >= IDB_BATCH_SIZE) {
                 await this.flushQueue();
             }
@@ -69,13 +73,13 @@ class ChunkStore {
     private async flushQueue() {
         if (this.writeQueue.length === 0 || !this.db) return;
 
+        // Create transaction only when necessary
         const tx = this.db.transaction('chunks', 'readwrite');
         const store = tx.objectStore('chunks');
         
-        // Execute all adds in parallel within one transaction
-        // This is MUCH faster than awaiting them one by one
+        // Parallelize the add operations within the transaction
         const promises = this.writeQueue.map(data => store.add({ data }));
-        this.writeQueue = []; // Clear queue immediately
+        this.writeQueue = []; // Clear queue immediately to free RAM
         
         await Promise.all(promises);
         await tx.done;
@@ -144,7 +148,8 @@ class TransferChannel {
 
     private setupEvents() {
         this.channel.binaryType = 'arraybuffer';
-        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE * 2; 
+        // Notify when buffer is half empty to keep pumping
+        this.channel.bufferedAmountLowThreshold = CHUNK_SIZE * 4; 
 
         this.channel.onopen = () => {
             console.log(`[Channel ${this.id}] Open`);
@@ -201,16 +206,19 @@ class TransferChannel {
             this.pendingReadRequests = 0;
             const worker = this.worker;
 
+            // The Pump: Keeps the worker busy with MAX_QUEUE_SIZE chunks
             const pump = () => {
                 if (this.channel.readyState !== 'open') {
                     reject(new Error("Channel closed"));
                     return;
                 }
 
+                // Stop if network buffer is full or queue is full
                 if (this.channel.bufferedAmount > MAX_BUFFERED_AMOUNT || this.pendingReadRequests >= MAX_QUEUE_SIZE) {
                     return; 
                 }
 
+                // Fill the pipeline!
                 while (
                     fileOffset < file.size && 
                     this.pendingReadRequests < MAX_QUEUE_SIZE &&
@@ -242,6 +250,7 @@ class TransferChannel {
                     this.pendingReadRequests--;
 
                     try {
+                        // Send data immediately
                         this.channel.send(buffer);
                         this.manager.updateProgress(buffer.byteLength);
 
@@ -256,6 +265,7 @@ class TransferChannel {
                             this.manager.markSenderFileComplete();
                             resolve();
                         } else {
+                            // Immediately try to fill the queue again
                             pump();
                         }
                     } catch (err) {
@@ -266,6 +276,7 @@ class TransferChannel {
             };
 
             worker.addEventListener('message', messageHandler);
+            // Start the pipeline
             pump();
         });
     }
