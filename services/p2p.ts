@@ -152,7 +152,8 @@ export class P2PManager {
                  const control = this.peerConnection!.createDataChannel('control', { ordered: true });
                  this.setupChannel(control);
                  
-                 // Main transfer channel - Ordered TRUE is crucial for simplicity and preventing missing chunks
+                 // HIGH PERFORMANCE TUNING
+                 // We rely on SCTP's internal buffering.
                  const transfer = this.peerConnection!.createDataChannel('transfer', { ordered: true });
                  this.setupChannel(transfer);
                  

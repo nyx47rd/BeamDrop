@@ -3,9 +3,15 @@ import { TransferProgress } from '../types';
 import { deviceService } from './device';
 import { TransferMonitor } from './stats'; 
 
-// Increased chunk size for efficiency since we are using backpressure
-const CHUNK_SIZE = 64 * 1024; // 64KB
-const MAX_BUFFERED_AMOUNT = 64 * 1024; // Wait if buffer > 64KB
+// HIGH PERFORMANCE CONFIG
+// 64KB is safe for fragmentation, but we will pile them up in the buffer.
+const CHUNK_SIZE = 64 * 1024; 
+
+// Allow up to 16MB in the outgoing buffer. This saturates 100mbps+ LANs.
+const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024; 
+
+// When buffer drops below 1MB, refill immediately.
+const BUFFER_LOW_THRESHOLD = 1 * 1024 * 1024;
 
 const createWorker = () => new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
 
@@ -29,10 +35,12 @@ export class SenderManager {
     }
 
     public setControlChannel(ch: RTCDataChannel) { this.controlChannel = ch; }
+    
     public setTransferChannel(ch: RTCDataChannel) { 
         this.transferChannel = ch; 
-        // Important: Set low threshold to trigger the event correctly
-        this.transferChannel.bufferedAmountLowThreshold = 0;
+        // Critical: Set the low threshold. The 'bufferedamountlow' event triggers when buffer drops BELOW this.
+        // We set it to 1MB so we have time to refill before it hits 0.
+        this.transferChannel.bufferedAmountLowThreshold = BUFFER_LOW_THRESHOLD;
     }
 
     public handleControlMessage(msg: any) {
@@ -96,9 +104,8 @@ export class SenderManager {
 
         await this.waitForControlMessage('ready-for-file');
 
-        // --- THE ROBUST TRANSFER LOOP ---
         try {
-            await this.pumpFileWithBackpressure(file);
+            await this.pumpFileHighSpeed(file);
         } catch (e) {
             console.error("Transfer interrupted", e);
             this.isSending = false;
@@ -130,34 +137,16 @@ export class SenderManager {
         }
     }
 
-    private pumpFileWithBackpressure(file: File): Promise<void> {
+    private pumpFileHighSpeed(file: File): Promise<void> {
         return new Promise((resolve, reject) => {
             let offset = 0;
+            let paused = false;
             
-            // We use the worker to read the file from disk without freezing UI
-            const onChunkReady = async (e: MessageEvent) => {
-                if (e.data.type === 'chunk_ready') {
-                    const { buffer, eof } = e.data;
-                    
-                    try {
-                        await this.sendBufferSafe(buffer);
-                    } catch (err) {
-                        this.worker.removeEventListener('message', onChunkReady);
-                        reject(err);
-                        return;
-                    }
-
-                    if (eof) {
-                        this.worker.removeEventListener('message', onChunkReady);
-                        resolve();
-                    } else {
-                        offset += CHUNK_SIZE;
-                        readNext();
-                    }
-                }
-            };
-
+            // This function asks the worker for data. 
+            // We call it repeatedly until the buffer is full.
             const readNext = () => {
+                if (paused) return; // Don't request if we are waiting for drain
+                
                 this.worker.postMessage({ 
                     type: 'read_chunk', 
                     file, 
@@ -166,31 +155,61 @@ export class SenderManager {
                 });
             };
 
+            const onChunkReady = async (e: MessageEvent) => {
+                if (e.data.type === 'chunk_ready') {
+                    const { buffer, eof } = e.data;
+
+                    try {
+                        if (!this.transferChannel || this.transferChannel.readyState !== 'open') {
+                            throw new Error("Transfer channel closed");
+                        }
+
+                        // Send immediately
+                        this.transferChannel.send(buffer);
+                        
+                        // Check Buffer
+                        if (this.transferChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+                            // STOP reading. Wait for drain.
+                            paused = true; 
+                            
+                            const onDrain = () => {
+                                this.transferChannel!.removeEventListener('bufferedamountlow', onDrain);
+                                paused = false;
+                                // Buffer drained enough, resume reading
+                                if (!eof) {
+                                    offset += CHUNK_SIZE;
+                                    readNext();
+                                }
+                            };
+                            this.transferChannel.addEventListener('bufferedamountlow', onDrain);
+                        } 
+                        else {
+                            // Buffer is fine, keep pumping
+                            if (eof) {
+                                this.worker.removeEventListener('message', onChunkReady);
+                                resolve();
+                            } else {
+                                offset += CHUNK_SIZE;
+                                readNext();
+                            }
+                        }
+
+                        // Edge case: if EOF happened while buffer was full, we still need to resolve
+                        if (eof && paused) {
+                             this.worker.removeEventListener('message', onChunkReady);
+                             resolve();
+                        }
+
+                    } catch (err) {
+                        this.worker.removeEventListener('message', onChunkReady);
+                        reject(err);
+                    }
+                }
+            };
+
             this.worker.addEventListener('message', onChunkReady);
-            readNext();
+            readNext(); // Start the loop
         });
-    }
-
-    // CRITICAL: This method waits if the network buffer is full.
-    // This effectively syncs the sender speed with the receiver speed.
-    private async sendBufferSafe(buffer: ArrayBuffer): Promise<void> {
-        if (!this.transferChannel || this.transferChannel.readyState !== 'open') {
-            throw new Error("Transfer channel closed");
-        }
-
-        // Backpressure check
-        if (this.transferChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
-            await new Promise<void>(resolve => {
-                const handler = () => {
-                    this.transferChannel!.removeEventListener('bufferedamountlow', handler);
-                    resolve();
-                };
-                this.transferChannel!.addEventListener('bufferedamountlow', handler);
-            });
-        }
-
-        // Send raw buffer (no header needed, we trust TCP/SCTP order)
-        this.transferChannel.send(buffer);
     }
 
     private waitForControlMessage(expectedType: string): Promise<void> {
