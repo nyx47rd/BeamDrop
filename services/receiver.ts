@@ -4,8 +4,8 @@ import { openDB, IDBPDatabase } from 'idb';
 import { deviceService } from './device';
 import { TransferMonitor } from './stats';
 
-const RAM_THRESHOLD = 150 * 1024 * 1024; 
-const IDB_BATCH_SIZE = 50; 
+const RAM_THRESHOLD = 150 * 1024 * 1024; // 150MB
+const IDB_BATCH_SIZE = 50; // Reduced batch size for smoother UI
 const SYNC_INTERVAL_MS = 500; 
 
 // --- STORAGE ENGINE ---
@@ -16,6 +16,8 @@ class ChunkStore {
     private db: IDBPDatabase | null = null;
     private writeQueue: ArrayBuffer[] = []; 
     private fileType: string;
+    
+    // We just track total bytes now, logic is much simpler
     public bytesReceived = 0;
 
     constructor(fileSize: number, fileType: string) {
@@ -48,6 +50,7 @@ class ChunkStore {
         
         const tx = this.db.transaction('chunks', 'readwrite');
         const store = tx.objectStore('chunks');
+        // We can just add, order is preserved by array push order and insertion time
         await Promise.all(this.writeQueue.map(chunk => store.add(chunk)));
         this.writeQueue = [];
         await tx.done;
@@ -71,18 +74,18 @@ class ChunkStore {
 
 export class ReceiverManager {
     private controlChannel: RTCDataChannel | null = null;
-    
-    // Support Multiple Active Stores (Multiplexing)
-    private stores: Map<number, ChunkStore> = new Map();
-    private metas: Map<number, FileMetadata> = new Map();
-
+    private chunkStore: ChunkStore | null = null;
+    private currentMeta: FileMetadata | null = null;
     private monitor: TransferMonitor; 
 
+    // UI Callbacks
     private onProgress: (p: TransferProgress) => void;
     private onFileReceived: (blob: Blob, meta: FileMetadata) => void;
 
+    // State
     private completedFilesCount = 0;
     private totalFilesCount = 0;
+    private currentFileName = '';
     private lastEmit = 0;
 
     constructor(
@@ -98,76 +101,58 @@ export class ReceiverManager {
         this.controlChannel = channel;
     }
 
-    public async handleBinaryChunk(buffer: ArrayBuffer) {
-        // --- DEMULTIPLEXING ---
-        // Protocol: [FileIndex (4 bytes)][Data...]
-        if (buffer.byteLength < 4) return;
-
-        const view = new DataView(buffer);
-        const fileIndex = view.getInt32(0); // Read header
+    public async handleBinaryChunk(data: ArrayBuffer) {
+        if (!this.chunkStore) return; 
         
-        // Extract actual data (Slice is basically zero-copy reference in many implementations, or fast copy)
-        const chunkData = buffer.slice(4);
-
-        const store = this.stores.get(fileIndex);
-        if (store) {
-            await store.add(chunkData);
-            this.handleBytesReceived(chunkData.byteLength);
-        }
+        await this.chunkStore.add(data);
+        this.handleBytesReceived(data.byteLength);
     }
 
     public async handleControlMessage(data: any) {
         if (data.type === 'offer-batch') {
             this.totalFilesCount = data.meta.totalFiles;
             this.completedFilesCount = 0;
-            this.stores.clear();
-            this.metas.clear();
             this.monitor.reset(data.meta.totalSize);
             this.sendControl({ type: 'accept-batch' });
         }
         else if (data.type === 'file-start') {
-            const meta = data.meta as FileMetadata;
-            const idx = meta.fileIndex;
+            this.currentMeta = data.meta;
+            this.currentFileName = data.meta.name;
             
-            this.metas.set(idx, meta);
-            const newStore = new ChunkStore(meta.size, meta.type);
-            await newStore.init();
-            this.stores.set(idx, newStore);
+            this.chunkStore = new ChunkStore(data.meta.size, data.meta.type);
+            await this.chunkStore.init();
 
             this.emitProgress();
-            // Acknowledge specific file readiness
-            this.sendControl({ type: `ready-for-file-${idx}` });
+            this.sendControl({ type: 'ready-for-file' });
         }
         else if (data.type === 'file-end') {
-            const idx = data.fileIndex;
-            await this.finalizeFile(idx);
+            this.finalizeFile();
         }
     }
 
-    private async finalizeFile(fileIndex: number) {
-        const store = this.stores.get(fileIndex);
-        const meta = this.metas.get(fileIndex);
+    private async finalizeFile() {
+        if (!this.chunkStore || !this.currentMeta) return;
 
-        if (!store || !meta) return;
-
-        console.log(`Receiver: Finalizing ${meta.name} (ID: ${fileIndex})`);
+        // Since we use ordered reliable channels, if we get 'file-end', 
+        // we are guaranteed to have received all previous binary packets.
+        // No missing chunk check needed anymore.
         
-        const blob = await store.finish();
-        this.onFileReceived(blob, meta);
+        console.log(`Receiver: Finalizing ${this.currentMeta.name}`);
+        
+        const blob = await this.chunkStore.finish();
+        this.onFileReceived(blob, this.currentMeta);
         
         this.completedFilesCount++;
-        
-        // Cleanup memory
-        this.stores.delete(fileIndex);
-        this.metas.delete(fileIndex);
-
         this.emitProgress(); 
 
-        this.sendControl({ type: `ack-file-${fileIndex}` });
+        this.sendControl({ type: 'ack-file' });
         
         if (this.completedFilesCount === this.totalFilesCount) {
                 deviceService.sendNotification('Files Received', `All ${this.totalFilesCount} files received.`);
         }
+
+        this.chunkStore = null;
+        this.currentMeta = null;
     }
 
     private handleBytesReceived(bytes: number) {
@@ -181,16 +166,8 @@ export class ReceiverManager {
 
     private emitProgress() {
         const metrics = this.monitor.getMetrics();
-        
-        // If multiple files are active, we show "Batch Transfer" generic name or the last active one
-        // For smoother UI, we just say "Batch Processing" if > 1 active
-        const activeCount = this.stores.size;
-        const nameDisplay = activeCount > 1 
-            ? `Processing ${activeCount} files...` 
-            : (this.metas.values().next().value?.name || 'Processing...');
-
         this.onProgress({
-            fileName: nameDisplay,
+            fileName: this.currentFileName,
             transferredBytes: 0, 
             fileSize: 0, 
             totalFiles: this.totalFilesCount,
@@ -209,8 +186,7 @@ export class ReceiverManager {
                 speed: metrics.speed,
                 eta: metrics.eta,
                 totalFiles: this.totalFilesCount,
-                completedFiles: this.completedFilesCount,
-                fileName: nameDisplay // Optional
+                completedFiles: this.completedFilesCount
             }
         });
     }
@@ -222,7 +198,6 @@ export class ReceiverManager {
     }
 
     public cleanup() {
-        this.stores.clear();
-        this.metas.clear();
+        this.chunkStore = null;
     }
 }
