@@ -16,6 +16,10 @@ export class SenderManager {
     private queue: File[] = [];
     private isSending = false;
     
+    // Resolver map for Strict Handshake
+    private pendingControlResolvers: Map<string, () => void> = new Map();
+    
+    // Helper to format strings consistently with receiver
     private monitorHelper = new TransferMonitor(); 
 
     // UI Callbacks
@@ -34,31 +38,36 @@ export class SenderManager {
     public setChannels(control: RTCDataChannel, data: RTCDataChannel[]) {
         this.controlChannel = control;
         this.dataChannels = data;
-        
-        // Listen for ACKs and SYNC from Receiver
-        this.controlChannel.onmessage = (e) => {
-            try {
-                const msg = JSON.parse(e.data);
-                
-                // *** SYNCHRONIZATION LOGIC ***
-                if (msg.type === 'progress-sync' && msg.progressReport) {
-                    const r = msg.progressReport;
-                    
-                    this.onProgress({
-                        fileName: this.currentFileName,
-                        transferredBytes: 0,
-                        fileSize: 0,
-                        totalFiles: r.totalFiles,
-                        currentFileIndex: r.completedFiles + 1,
-                        totalBatchBytes: this.totalSize,
-                        transferredBatchBytes: r.transferredBytes,
-                        speed: this.formatSpeed(r.speed),
-                        eta: this.formatETA(r.eta),
-                        isComplete: false 
-                    });
-                }
-            } catch(err) {}
-        };
+        // Note: We do NOT set onmessage here anymore to avoid overwriting the Router in P2PManager.
+    }
+
+    /**
+     * Called by P2PManager when a control message arrives.
+     */
+    public handleMessage(msg: any) {
+        // 1. Progress Sync from Receiver
+        if (msg.type === 'progress-sync' && msg.progressReport) {
+            const r = msg.progressReport;
+            this.onProgress({
+                fileName: this.currentFileName,
+                transferredBytes: 0,
+                fileSize: 0,
+                totalFiles: r.totalFiles,
+                currentFileIndex: r.completedFiles + 1,
+                totalBatchBytes: this.totalSize,
+                transferredBatchBytes: r.transferredBytes,
+                speed: this.formatSpeed(r.speed),
+                eta: this.formatETA(r.eta),
+                isComplete: false 
+            });
+        }
+
+        // 2. Handshake Resolvers (accept-batch, ready-for-file, ack-file)
+        if (this.pendingControlResolvers.has(msg.type)) {
+            const resolve = this.pendingControlResolvers.get(msg.type);
+            this.pendingControlResolvers.delete(msg.type);
+            resolve && resolve();
+        }
     }
 
     public async sendFiles(files: File[]) {
@@ -93,7 +102,7 @@ export class SenderManager {
             transferredBytes: 0,
             fileSize: file.size,
             totalFiles: this.totalFiles,
-            currentFileIndex: (this.totalFiles - this.queue.length), 
+            currentFileIndex: (this.totalFiles - this.queue.length), // rough calc
             totalBatchBytes: this.totalSize,
             transferredBatchBytes: 0, 
             speed: 'Starting...',
@@ -114,7 +123,7 @@ export class SenderManager {
         // STEP 4: End File
         this.sendControl({ type: 'file-end' });
 
-        // STEP 5: Wait for ACK
+        // STEP 5: Wait for ACK (Handshake to ensure receiver processed everything)
         await this.waitForControlMessage('ack-file');
 
         this.isSending = false;
@@ -123,6 +132,7 @@ export class SenderManager {
             this.processQueue();
         } else {
             deviceService.sendNotification('Transfer Complete');
+            // Final update to 100%
              this.onProgress({
                 fileName: 'Complete',
                 transferredBytes: 0,
@@ -143,9 +153,9 @@ export class SenderManager {
             let offset = 0;
             let chunkIndex = 0;
             let readsPending = 0;
-            const MAX_READS = 50; // Increased buffer for speed
+            const MAX_READS = 50; 
 
-            const onChunk = (e: MessageEvent) => {
+            const onChunk = async (e: MessageEvent) => {
                 if (e.data.type === 'chunk_ready') {
                     const { buffer, eof } = e.data;
                     readsPending--;
@@ -155,15 +165,27 @@ export class SenderManager {
                     new DataView(packet.buffer).setUint32(0, chunkIndex, false);
                     packet.set(new Uint8Array(buffer), HEADER_SIZE);
 
-                    // Send (Round Robin)
-                    try {
-                        const ch = this.dataChannels[chunkIndex % this.dataChannels.length];
-                        if (ch?.readyState === 'open') {
-                            ch.send(packet);
-                        } else {
-                            this.controlChannel?.send(packet); 
+                    // Send (Round Robin) with Retry
+                    let sent = false;
+                    let attempts = 0;
+                    while (!sent && attempts < 3) {
+                        try {
+                            const ch = this.dataChannels[chunkIndex % this.dataChannels.length];
+                            if (ch?.readyState === 'open') {
+                                ch.send(packet);
+                                sent = true;
+                            } else if (this.controlChannel?.readyState === 'open') {
+                                this.controlChannel.send(packet); // Fallback
+                                sent = true;
+                            } else {
+                                throw new Error("Channels busy or closed");
+                            }
+                        } catch (err) { 
+                            attempts++;
+                            // Tiny backoff
+                            await new Promise(r => setTimeout(r, 10));
                         }
-                    } catch (err) { console.error("Send failed", err); }
+                    }
 
                     chunkIndex++;
 
@@ -183,7 +205,7 @@ export class SenderManager {
                 let totalBuffered = 0;
                 this.dataChannels.forEach(c => totalBuffered += c.bufferedAmount);
                 if (totalBuffered > MAX_BUFFERED_AMOUNT) {
-                    setTimeout(loadMore, 5); // Faster retry
+                    setTimeout(loadMore, 10);
                     return;
                 }
 
@@ -203,33 +225,19 @@ export class SenderManager {
         });
     }
 
-    /**
-     * Blocks until a specific control message is received.
-     */
     private waitForControlMessage(expectedType: string): Promise<void> {
-        return new Promise((resolve) => {
-            if (!this.controlChannel) return resolve();
-
-            // We need a temporary listener just for this handshake
-            const handler = (e: MessageEvent) => {
-                try {
-                    const msg = JSON.parse(e.data);
-                    if (msg.type === expectedType) {
-                        this.controlChannel?.removeEventListener('message', handler);
-                        resolve();
-                    }
-                } catch(err) {}
-            };
+        return new Promise(resolve => {
+            // Register resolver
+            this.pendingControlResolvers.set(expectedType, resolve);
             
-            this.controlChannel.addEventListener('message', handler);
-            
-            // Safety timeout (30s) - prevent infinite hanging if network drops
+            // Safety timeout
             setTimeout(() => {
-                this.controlChannel?.removeEventListener('message', handler);
-                // If timed out, we resolve anyway to try and error out or continue,
-                // but ideally we should throw. For now, we resolve to unblock.
-                resolve(); 
-            }, 30000);
+                if (this.pendingControlResolvers.has(expectedType)) {
+                    console.warn(`Timeout waiting for ${expectedType}, proceeding anyway to unblock UI.`);
+                    this.pendingControlResolvers.delete(expectedType);
+                    resolve();
+                }
+            }, 30000); 
         });
     }
 
@@ -239,7 +247,7 @@ export class SenderManager {
         }
     }
 
-    // Formatting helpers
+    // Formatting helpers duplicated to keep this file self-contained
     private formatSpeed(bytesPerSec: number): string {
         if (bytesPerSec === 0) return '0 MB/s';
         const mb = bytesPerSec / (1024 * 1024);
@@ -260,5 +268,6 @@ export class SenderManager {
     public cleanup() {
         this.worker.terminate();
         this.queue = [];
+        this.pendingControlResolvers.clear();
     }
 }

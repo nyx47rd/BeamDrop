@@ -17,6 +17,8 @@ export class P2PManager {
   // Connection Resources
   private controlChannel: RTCDataChannel | null = null;
   private dataChannels: RTCDataChannel[] = [];
+  
+  private announceInterval: any = null;
 
   private listeners = {
     state: (s: ConnectionState) => {},
@@ -61,6 +63,11 @@ export class P2PManager {
       this.sender.cleanup();
       this.receiver.cleanup();
       
+      if (this.announceInterval) {
+          clearInterval(this.announceInterval);
+          this.announceInterval = null;
+      }
+      
       signalingService.disconnect();
       this.updateState('idle');
   }
@@ -104,25 +111,32 @@ export class P2PManager {
       
       if (ch.label === 'control') {
           this.controlChannel = ch;
-          // Pass control channel to both managers (Sender needs it for sending control, Receiver for ACKs)
-          // Ideally we check our role, but giving it to both is safe as they use it contextually.
           this.receiver.setControlChannel(ch);
       } else {
           this.dataChannels.push(ch);
       }
       
-      // Wire up message handling for Receiver
+      // CRITICAL: Unified Message Router
+      // We must route messages to BOTH managers because they both need to see Control messages.
+      // - Receiver needs to see 'offer-batch', 'file-start'
+      // - Sender needs to see 'accept-batch', 'ready-for-file', 'progress-sync'
       ch.onmessage = (e) => {
           const isBinary = e.data instanceof ArrayBuffer;
           const data = isBinary ? e.data : JSON.parse(e.data);
+          
+          // Receiver handles everything (Binary Chunks + Control Commands)
           this.receiver.handleMessage(data, isBinary);
+          
+          // Sender only listens for Control Responses (JSON)
+          if (!isBinary) {
+              this.sender.handleMessage(data);
+          }
       };
 
       // Check if all channels are ready to arm the Sender
-      if (this.controlChannel && this.dataChannels.length >= 3) { // Assuming 3 data channels
+      if (this.controlChannel && this.dataChannels.length >= 3) { 
            this.sender.setChannels(this.controlChannel, this.dataChannels);
       } else if (this.controlChannel) {
-           // Fallback/Partial setup
            this.sender.setChannels(this.controlChannel, this.dataChannels);
       }
   }
@@ -170,9 +184,11 @@ export class P2PManager {
   }
 
   private startAnnouncing() {
+     if (this.announceInterval) clearInterval(this.announceInterval);
+     
      const run = () => signalingService.sendSignal({ type: 'join', senderId: this.myId });
      run();
-     setInterval(run, 2000);
+     this.announceInterval = setInterval(run, 2000);
   }
 
   private updateState(s: ConnectionState) { 
