@@ -5,6 +5,7 @@ export interface FileMetadata {
   size: number;
   type: string;
   totalChunks: number; // Critical for verify integrity
+  fileIndex: number; // Added for Multiplexing routing
 }
 
 export interface BatchMetadata {
@@ -27,6 +28,7 @@ export interface ChunkData {
   progressReport?: ProgressReport;
   data?: string; // Base64 encoded for simplicity in JSON, or ArrayBuffer handling
   chunkIndex?: number;
+  fileIndex?: number; // Used for control messages specific to a file
 }
 
 export type ConnectionState = 'idle' | 'signaling' | 'connecting' | 'connected' | 'disconnected' | 'failed';
