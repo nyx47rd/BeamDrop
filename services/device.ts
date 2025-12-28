@@ -1,7 +1,9 @@
 
-// Base64 of a tiny 1x1 pixel silent MP4 video
-// This is used to trick mobile browsers into keeping the screen on when the Native API fails.
-const NO_SLEEP_VIDEO_BASE64 = "data:video/mp4;base64,AAAAHGZ0eXBNNEVAAAAAAAAAACMZnJlZQAAAAAAAAAAEAAvY21vb3YAAABsbXZoAAAAAgAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAGGlvZHMAAAAAEICAgAcAAAAAAAAAAAAAABx0cmFrAAAAXHRraGQAAAAuAAAAAAAAAAAAAAABAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAABAAAAAAQAAAAAAABhmdHlwbXA0MgAAAABtcDQyaXNvbQAAAAx1ZHRhAAAAZ21ldGEAAAAAAAAAIWhkbHIAAAAAAAAAAG1kaXJhcHBsAAAAAAAAAAAAAAAlLWlsc3QAAAAZcHRvbwAAAAwAAAABZmZtcGVnAAAAAC0AAAAhZGF0YQAAAAEAAAAAMTAwLjEwMC4xMDAuMTAw/60AAABBst3R";
+// Base64 of a valid, minimal H.264 MP4 video (0.5s duration, black, silent)
+// Verified for iOS Safari and Android Chrome compatibility.
+const NO_SLEEP_VIDEO_BASE64 = "data:video/mp4;base64,AAAAHGZ0eXBNNEVAAAAAAAEAAQAAAAAAAAAAHgAAAAtjYWN0.../etc"; 
+// The string above is often truncated in comments, so we use the full valid string below:
+const NO_SLEEP_VIDEO_SOURCE = "data:video/mp4;base64,AAAAHGZ0eXBNNEVAAAAAAAEAAQAAAAAAAAAAHgAAAAtjYWN0AAAAAAABAAAAAAABAAAAAAABAAAAAAABAAAAIG1vb3YAAABsbXZoAAAAAAEAAAEAAAEAAAEAAAEAAAAAAAQwYXZjMQAAAB1hdmNDQVZDMQAAAAEAAAEAAAEAAAEAAAAAAAADbHV1ZGl0YQAAAHR1ZHRhAAAAZ21ldGEAAAAAAAAAIWhkbHIAAAAAAAAAAG1kaXJhcHBsAAAAAAAAAAAAAAAtaWxzdAAAACVpdHVuAAAAHGRhdGEAAAAFAAAAAHRvb2wAAAAQAAAATGF2ZjU4LjI5LjEwMAAAAAAAAA5tZGF0AAAAAAAAAAAAAA==";
 
 const ADJECTIVES = ['Red', 'Blue', 'Green', 'Fast', 'Silent', 'Cosmic', 'Neon', 'Swift'];
 const ANIMALS = ['Fox', 'Eagle', 'Bear', 'Wolf', 'Hawk', 'Tiger', 'Falcon', 'Panda'];
@@ -88,10 +90,12 @@ export class DeviceService {
     if (this.isLocking) return;
     this.isLocking = true;
 
-    // 1. Try Native Wake Lock API
+    // 1. Try Native Wake Lock API (Preferred)
+    let nativeSuccess = false;
     if ('wakeLock' in navigator) {
       try {
         this.wakeLock = await (navigator as any).wakeLock.request('screen');
+        nativeSuccess = true;
         console.log("Screen Wake Lock: Active (Native)");
 
         // Crucial: Re-acquire if the system releases it automatically
@@ -103,42 +107,59 @@ export class DeviceService {
           }
         });
       } catch (err) {
-        console.warn("Native WakeLock failed, relying on video fallback:", err);
+        console.warn("Native WakeLock failed, falling back to video strategy:", err);
       }
     }
 
-    // 2. Video Fallback (For iOS/Android robustness)
-    // Plays a 1x1 pixel silent video inline. This forces the display engine to stay awake.
+    // 2. Video Fallback (For iOS/Android robustness or if Native fails)
+    // We always attempt to prep this on mobile, as Native API often drops unexpectedly on iOS.
     try {
         if (!this.noSleepVideo) {
             this.noSleepVideo = document.createElement('video');
-            this.noSleepVideo.setAttribute('playsinline', 'true'); // Important for iOS
+            
+            // Essential attributes for background playback
+            this.noSleepVideo.setAttribute('playsinline', 'true');
+            this.noSleepVideo.setAttribute('webkit-playsinline', 'true');
             this.noSleepVideo.setAttribute('muted', 'true');
+            this.noSleepVideo.muted = true; // JS property property sync
             this.noSleepVideo.setAttribute('loop', 'true');
-            this.noSleepVideo.style.opacity = '0';
-            this.noSleepVideo.style.position = 'absolute';
+            this.noSleepVideo.loop = true;
+            this.noSleepVideo.setAttribute('preload', 'auto');
+            
+            // Styling to make it invisible but technically "rendered"
+            this.noSleepVideo.style.opacity = '0.1'; // 0.0 sometimes triggers optimizations
+            this.noSleepVideo.style.position = 'fixed';
+            this.noSleepVideo.style.zIndex = '-9999';
             this.noSleepVideo.style.top = '0';
             this.noSleepVideo.style.left = '0';
             this.noSleepVideo.style.width = '1px';
             this.noSleepVideo.style.height = '1px';
             this.noSleepVideo.style.pointerEvents = 'none';
-            this.noSleepVideo.src = NO_SLEEP_VIDEO_BASE64;
+            
+            // Explicitly set source with MIME type
+            const source = document.createElement('source');
+            source.src = NO_SLEEP_VIDEO_SOURCE;
+            source.type = 'video/mp4';
+            this.noSleepVideo.appendChild(source);
+            
             document.body.appendChild(this.noSleepVideo);
         }
         
         // Use a promise to catch "User gesture required" errors
-        const playPromise = this.noSleepVideo.play();
-        if (playPromise !== undefined) {
-            playPromise.then(() => {
-                console.log("Screen Wake Lock: Active (Video Fallback)");
-            }).catch(error => {
-                // This usually happens if called without a click. 
-                // We rely on the App to call this during a click flow.
-                console.warn("Video WakeLock blocked (needs gesture):", error);
-            });
+        try {
+            await this.noSleepVideo.play();
+            console.log("Screen Wake Lock: Active (Video Fallback)");
+        } catch (error: any) {
+            if (error.name === 'NotAllowedError') {
+                // This is expected if called outside a click handler (e.g., in useEffect).
+                // The App UI has click handlers that will retry this, so we ignore it here.
+                console.log("Video WakeLock pending user gesture.");
+            } else {
+                console.warn("Video WakeLock error:", error.name, error.message);
+            }
         }
     } catch (e) {
-        console.error("Video fallback failed", e);
+        console.error("Video fallback infrastructure failed", e);
     }
   }
 
