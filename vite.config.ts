@@ -14,7 +14,8 @@ export default defineConfig({
         skipWaiting: true,
         // Fix 404 on routes: Serve index.html for all navigation requests
         navigateFallback: '/index.html',
-        navigateFallbackDenylist: [/^\/api\//], // Don't fallback for API routes if any
+        // Exclude API routes and static SEO files from being handled by the SPA fallback
+        navigateFallbackDenylist: [/^\/api\//, /sitemap\.xml$/, /robots\.txt$/], 
       },
       manifest: {
         name: 'BeamDrop P2P',
