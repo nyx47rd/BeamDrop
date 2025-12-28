@@ -1,7 +1,7 @@
 
 import { TransferProgress } from '../types';
 import { deviceService } from './device';
-import { TransferMonitor } from './stats'; // Used only for formatting helpers
+import { TransferMonitor } from './stats'; 
 
 const CHUNK_SIZE = 64 * 1024; // 64KB
 const HEADER_SIZE = 4;
@@ -16,16 +16,10 @@ export class SenderManager {
     private queue: File[] = [];
     private isSending = false;
     
-    // Resolver map for Strict Handshake
     private pendingControlResolvers: Map<string, () => void> = new Map();
-    
-    // Helper to format strings consistently with receiver
     private monitorHelper = new TransferMonitor(); 
-
-    // UI Callbacks
     private onProgress: (p: TransferProgress) => void;
     
-    // State
     private currentFileName = '';
     private totalFiles = 0;
     private totalSize = 0;
@@ -38,14 +32,9 @@ export class SenderManager {
     public setChannels(control: RTCDataChannel, data: RTCDataChannel[]) {
         this.controlChannel = control;
         this.dataChannels = data;
-        // Note: We do NOT set onmessage here anymore to avoid overwriting the Router in P2PManager.
     }
 
-    /**
-     * Called by P2PManager when a control message arrives.
-     */
     public handleMessage(msg: any) {
-        // 1. Progress Sync from Receiver
         if (msg.type === 'progress-sync' && msg.progressReport) {
             const r = msg.progressReport;
             this.onProgress({
@@ -61,8 +50,6 @@ export class SenderManager {
                 isComplete: false 
             });
         }
-
-        // 2. Handshake Resolvers (accept-batch, ready-for-file, ack-file)
         if (this.pendingControlResolvers.has(msg.type)) {
             const resolve = this.pendingControlResolvers.get(msg.type);
             this.pendingControlResolvers.delete(msg.type);
@@ -77,15 +64,12 @@ export class SenderManager {
         this.totalSize = files.reduce((acc, f) => acc + f.size, 0);
         this.totalFiles = files.length;
         
-        // STEP 1: Handshake - Offer Batch
         console.log("Sender: Offering Batch...");
         this.sendControl({ type: 'offer-batch', meta: { totalFiles: this.totalFiles, totalSize: this.totalSize } });
         
-        // Wait for Receiver to say "I accept the batch"
         await this.waitForControlMessage('accept-batch');
         console.log("Sender: Batch Accepted");
 
-        // Start Processing
         this.processQueue();
     }
 
@@ -102,7 +86,7 @@ export class SenderManager {
             transferredBytes: 0,
             fileSize: file.size,
             totalFiles: this.totalFiles,
-            currentFileIndex: (this.totalFiles - this.queue.length), // rough calc
+            currentFileIndex: (this.totalFiles - this.queue.length), 
             totalBatchBytes: this.totalSize,
             transferredBatchBytes: 0, 
             speed: 'Starting...',
@@ -110,11 +94,20 @@ export class SenderManager {
             isComplete: false
         });
 
-        // STEP 2: File Start Handshake
-        this.sendControl({ type: 'file-start', meta: { name: file.name, size: file.size, type: file.type } });
+        // Calculate TOTAL CHUNKS for Integrity Check
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
-        // Wait for Receiver to say "Ready for File"
-        // This is crucial. We DO NOT pump data until receiver says yes.
+        // STEP 2: File Start Handshake
+        this.sendControl({ 
+            type: 'file-start', 
+            meta: { 
+                name: file.name, 
+                size: file.size, 
+                type: file.type,
+                totalChunks: totalChunks // Send this to receiver
+            } 
+        });
+
         await this.waitForControlMessage('ready-for-file');
 
         // STEP 3: Pump Data
@@ -123,7 +116,7 @@ export class SenderManager {
         // STEP 4: End File
         this.sendControl({ type: 'file-end' });
 
-        // STEP 5: Wait for ACK (Handshake to ensure receiver processed everything)
+        // STEP 5: Wait for ACK
         await this.waitForControlMessage('ack-file');
 
         this.isSending = false;
@@ -132,7 +125,6 @@ export class SenderManager {
             this.processQueue();
         } else {
             deviceService.sendNotification('Transfer Complete');
-            // Final update to 100%
              this.onProgress({
                 fileName: 'Complete',
                 transferredBytes: 0,
@@ -160,29 +152,26 @@ export class SenderManager {
                     const { buffer, eof } = e.data;
                     readsPending--;
 
-                    // Wrap with Header
                     const packet = new Uint8Array(HEADER_SIZE + buffer.byteLength);
                     new DataView(packet.buffer).setUint32(0, chunkIndex, false);
                     packet.set(new Uint8Array(buffer), HEADER_SIZE);
 
-                    // Send (Round Robin) with Retry
                     let sent = false;
                     let attempts = 0;
-                    while (!sent && attempts < 3) {
+                    while (!sent && attempts < 5) { // Retry slightly more aggressive
                         try {
                             const ch = this.dataChannels[chunkIndex % this.dataChannels.length];
                             if (ch?.readyState === 'open') {
                                 ch.send(packet);
                                 sent = true;
                             } else if (this.controlChannel?.readyState === 'open') {
-                                this.controlChannel.send(packet); // Fallback
+                                this.controlChannel.send(packet);
                                 sent = true;
                             } else {
-                                throw new Error("Channels busy or closed");
+                                throw new Error("Channels busy");
                             }
                         } catch (err) { 
                             attempts++;
-                            // Tiny backoff
                             await new Promise(r => setTimeout(r, 10));
                         }
                     }
@@ -201,7 +190,6 @@ export class SenderManager {
             this.worker.addEventListener('message', onChunk);
 
             const loadMore = () => {
-                // Backpressure
                 let totalBuffered = 0;
                 this.dataChannels.forEach(c => totalBuffered += c.bufferedAmount);
                 if (totalBuffered > MAX_BUFFERED_AMOUNT) {
@@ -227,17 +215,14 @@ export class SenderManager {
 
     private waitForControlMessage(expectedType: string): Promise<void> {
         return new Promise(resolve => {
-            // Register resolver
             this.pendingControlResolvers.set(expectedType, resolve);
-            
-            // Safety timeout
             setTimeout(() => {
                 if (this.pendingControlResolvers.has(expectedType)) {
-                    console.warn(`Timeout waiting for ${expectedType}, proceeding anyway to unblock UI.`);
+                    console.warn(`Timeout waiting for ${expectedType}, proceeding.`);
                     this.pendingControlResolvers.delete(expectedType);
                     resolve();
                 }
-            }, 30000); 
+            }, 60000); // 60s timeout for large files
         });
     }
 
@@ -247,7 +232,6 @@ export class SenderManager {
         }
     }
 
-    // Formatting helpers duplicated to keep this file self-contained
     private formatSpeed(bytesPerSec: number): string {
         if (bytesPerSec === 0) return '0 MB/s';
         const mb = bytesPerSec / (1024 * 1024);

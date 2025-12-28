@@ -3,6 +3,7 @@ export interface FileMetadata {
   name: string;
   size: number;
   type: string;
+  totalChunks: number; // Critical for verify integrity
 }
 
 export interface BatchMetadata {
