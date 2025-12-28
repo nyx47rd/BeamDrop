@@ -9,7 +9,8 @@ const MAX_BUFFERED_AMOUNT = 1024 * 1024; // 1MB Backpressure limit
 const MAX_QUEUE_SIZE = 4; // Max chunks in memory per channel
 const ACK_TIMEOUT_MS = 5000; // Force continue if receiver doesn't ack
 
-const CONCURRENT_CHANNELS = 2;
+// UPDATED: Process 3 files concurrently
+const CONCURRENT_CHANNELS = 3;
 
 const createWorker = () => new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
 
