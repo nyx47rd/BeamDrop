@@ -7,7 +7,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['icon.svg', 'favicon.png', 'apple-touch-icon.png'],
+      includeAssets: ['icon.svg', 'favicon.png', 'apple-touch-icon.png', 'notification-icon.svg'],
       workbox: {
         cleanupOutdatedCaches: true,
         clientsClaim: true,

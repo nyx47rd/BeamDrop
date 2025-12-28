@@ -58,8 +58,8 @@ export class DeviceService {
 
         const options: any = {
           body,
-          icon: '/icon.svg',
-          badge: '/icon.svg',
+          icon: '/icon.svg', // Large icon (keeps the app style)
+          badge: '/notification-icon.svg', // Small icon for status bar (Transparent Zap)
           tag: 'beamdrop-transfer',
           renotify: true,
           requireInteraction: false,
