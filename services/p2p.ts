@@ -4,8 +4,9 @@ import { ConnectionState, FileMetadata, TransferProgress, BatchMetadata } from '
 import { deviceService } from './device';
 
 // Constants for Tuning Performance
-const CHUNK_SIZE = 64 * 1024; // 64KB chunks (Sweet spot for WebRTC SCTP)
-const MAX_BUFFER_THRESHOLD = 16 * 1024 * 1024; // 16MB Buffer Limit
+// Reduced to prevent 'OperationError: RTCDataChannel send queue is full' on mobile devices
+const CHUNK_SIZE = 16 * 1024; // 16KB chunks (Safe for all devices)
+const MAX_BUFFER_THRESHOLD = 64 * 1024; // 64KB Buffer Limit (Strict backpressure)
 
 // Expanded STUN server list
 const ICE_SERVERS = {
@@ -161,7 +162,8 @@ export class P2PManager {
     channel.onopen = () => {
       this.log("Data channel ready. You can now transfer files.");
       channel.binaryType = 'arraybuffer';
-      channel.bufferedAmountLowThreshold = 65536; // 64KB
+      // Set a low threshold to trigger 'bufferedamountlow' events frequently
+      channel.bufferedAmountLowThreshold = 32 * 1024; // 32KB
       
       if (this.peerConnection?.connectionState === 'connected') {
         this.updateState('connected');
@@ -342,7 +344,6 @@ export class P2PManager {
 
   /**
    * Sends multiple files as a batch.
-   * Calculates total size first, informs receiver, then sends individually.
    */
   public async sendFiles(files: File[]): Promise<void> {
       if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
@@ -377,6 +378,33 @@ export class P2PManager {
       this.batchState.active = false;
   }
 
+  private waitForDrain(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+        if (!this.dataChannel) return resolve();
+        if (this.dataChannel.bufferedAmount < MAX_BUFFER_THRESHOLD) return resolve();
+
+        const handler = () => {
+            cleanup();
+            resolve();
+        };
+        
+        const closeHandler = () => {
+             cleanup();
+             reject(new Error("Connection closed while waiting for drain"));
+        }
+
+        const cleanup = () => {
+            this.dataChannel?.removeEventListener('bufferedamountlow', handler);
+            this.dataChannel?.removeEventListener('close', closeHandler);
+            this.dataChannel?.removeEventListener('error', closeHandler);
+        }
+
+        this.dataChannel.addEventListener('bufferedamountlow', handler);
+        this.dataChannel.addEventListener('close', closeHandler);
+        this.dataChannel.addEventListener('error', closeHandler);
+    });
+  }
+
   /**
    * Internal Send Function (Worker-Based Multiprocessing)
    */
@@ -388,7 +416,6 @@ export class P2PManager {
     };
     this.dataChannel?.send(JSON.stringify({ type: 'file-start', metadata }));
     
-    // We don't reset startTime here for batches, we use batchState.startTime
     this.lastProgressEmit = 0;
 
     const worker = new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
@@ -407,29 +434,41 @@ export class P2PManager {
                 currentOffset = offset;
 
                 try {
-                    // Backpressure
-                    if (this.dataChannel && this.dataChannel.bufferedAmount > MAX_BUFFER_THRESHOLD) {
-                        await new Promise<void>(resolveDrain => {
-                            if (!this.dataChannel) return resolveDrain();
-                            const handler = () => {
-                                this.dataChannel?.removeEventListener('bufferedamountlow', handler);
-                                resolveDrain();
-                            };
-                            this.dataChannel.addEventListener('bufferedamountlow', handler);
-                        });
+                    // Robust Send Loop
+                    let chunkSent = false;
+                    while (!chunkSent) {
+                        // 1. Check Backpressure
+                        if (this.dataChannel && this.dataChannel.bufferedAmount > MAX_BUFFER_THRESHOLD) {
+                            await this.waitForDrain();
+                        }
+
+                        // 2. Try Sending
+                        try {
+                            if (this.dataChannel?.readyState === 'open') {
+                                this.dataChannel.send(buffer);
+                                chunkSent = true;
+                            } else {
+                                throw new Error("Connection lost");
+                            }
+                        } catch (err: any) {
+                            // 3. Handle specific "Queue Full" error if check wasn't enough
+                            if (err.name === 'OperationError' || (err.message && err.message.includes('full'))) {
+                                // Explicitly wait if the queue reports full, even if bufferedAmount seems okay
+                                console.warn("Backpressure: Queue full, pausing...");
+                                await this.waitForDrain();
+                            } else {
+                                throw err;
+                            }
+                        }
                     }
 
-                    if (this.dataChannel?.readyState === 'open') {
-                        this.dataChannel.send(buffer);
-                        // Report using current offset relative to file
-                        this.throttledReportProgress(currentOffset, file.size, file.name);
-                    } else {
-                        throw new Error("Connection lost");
-                    }
+                    // Report using current offset relative to file
+                    this.throttledReportProgress(currentOffset, file.size, file.name);
 
                     if (eof) {
                         finish();
                     } else {
+                        // Request next chunk
                         worker.postMessage({ type: 'read_chunk', file, chunkSize: CHUNK_SIZE, startOffset: currentOffset });
                     }
                 } catch (error) {
