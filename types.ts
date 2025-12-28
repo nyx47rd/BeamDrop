@@ -32,5 +32,6 @@ export interface TransferProgress {
   transferredBatchBytes: number;
   
   speed: string; // e.g., "1.2 MB/s"
+  eta: string; // e.g., "45s left"
   isComplete: boolean; // Is the ENTIRE batch complete?
 }

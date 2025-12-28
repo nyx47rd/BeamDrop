@@ -51,7 +51,12 @@ const ProgressBar = memo(({ progress }: { progress: TransferProgress | null }) =
         </div>
         <div className="flex flex-col items-end">
             <span className="text-xl font-mono font-bold text-white">{Math.round(percent)}%</span>
-            <span className="text-xs font-mono text-green-400">{progress.speed}</span>
+            <div className="flex items-center gap-2 text-xs font-mono">
+                <span className="text-green-400">{progress.speed}</span>
+                {progress.eta && !progress.isComplete && (
+                  <span className="text-neutral-500 border-l border-white/10 pl-2">{progress.eta}</span>
+                )}
+            </div>
         </div>
       </div>
 

@@ -411,6 +411,24 @@ export class P2PManager {
           ? `${(speed / (1024 * 1024)).toFixed(1)} MB/s` 
           : `${(speed / 1024).toFixed(0)} KB/s`;
 
+      // --- ETA CALCULATION ---
+      const remainingBytes = this.batchState.totalSize - this.batchState.transferredBytes;
+      let etaStr = '';
+      if (remainingBytes <= 0) {
+          etaStr = 'Done';
+      } else if (speed > 0) {
+          const etaSeconds = Math.ceil(remainingBytes / speed);
+          if (etaSeconds < 60) {
+              etaStr = `${etaSeconds}s left`;
+          } else {
+              const mins = Math.floor(etaSeconds / 60);
+              const secs = etaSeconds % 60;
+              etaStr = `${mins}m ${secs}s left`;
+          }
+      } else {
+          etaStr = 'Calculating...';
+      }
+
       let displayIndex = this.batchState.completedFilesCount + 1;
       if (displayIndex > this.batchState.totalFiles) displayIndex = this.batchState.totalFiles;
       
@@ -425,6 +443,7 @@ export class P2PManager {
           totalBatchBytes: this.batchState.totalSize,
           transferredBatchBytes: this.batchState.transferredBytes,
           speed: isComplete ? 'Done' : speedStr,
+          eta: isComplete ? '' : etaStr,
           isComplete: isComplete
       });
   }

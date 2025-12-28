@@ -98,10 +98,8 @@ export class DeviceService {
         nativeSuccess = true;
         console.log("Screen Wake Lock: Active (Native)");
 
-        // Crucial: Re-acquire if the system releases it automatically
         this.wakeLock.addEventListener('release', () => {
           console.log('Screen Wake Lock: Released by system');
-          // If we are still supposed to be locking, try again
           if (this.isLocking) {
             this.reAcquireLock();
           }
@@ -112,22 +110,18 @@ export class DeviceService {
     }
 
     // 2. Video Fallback (For iOS/Android robustness or if Native fails)
-    // We always attempt to prep this on mobile, as Native API often drops unexpectedly on iOS.
     try {
         if (!this.noSleepVideo) {
             this.noSleepVideo = document.createElement('video');
-            
-            // Essential attributes for background playback
             this.noSleepVideo.setAttribute('playsinline', 'true');
             this.noSleepVideo.setAttribute('webkit-playsinline', 'true');
             this.noSleepVideo.setAttribute('muted', 'true');
-            this.noSleepVideo.muted = true; // JS property property sync
+            this.noSleepVideo.muted = true;
             this.noSleepVideo.setAttribute('loop', 'true');
             this.noSleepVideo.loop = true;
             this.noSleepVideo.setAttribute('preload', 'auto');
             
-            // Styling to make it invisible but technically "rendered"
-            this.noSleepVideo.style.opacity = '0.1'; // 0.0 sometimes triggers optimizations
+            this.noSleepVideo.style.opacity = '0.1';
             this.noSleepVideo.style.position = 'fixed';
             this.noSleepVideo.style.zIndex = '-9999';
             this.noSleepVideo.style.top = '0';
@@ -136,7 +130,6 @@ export class DeviceService {
             this.noSleepVideo.style.height = '1px';
             this.noSleepVideo.style.pointerEvents = 'none';
             
-            // Explicitly set source with MIME type
             const source = document.createElement('source');
             source.src = NO_SLEEP_VIDEO_SOURCE;
             source.type = 'video/mp4';
@@ -145,14 +138,14 @@ export class DeviceService {
             document.body.appendChild(this.noSleepVideo);
         }
         
-        // Use a promise to catch "User gesture required" errors
         try {
             await this.noSleepVideo.play();
             console.log("Screen Wake Lock: Active (Video Fallback)");
         } catch (error: any) {
-            if (error.name === 'NotAllowedError') {
-                // This is expected if called outside a click handler (e.g., in useEffect).
-                // The App UI has click handlers that will retry this, so we ignore it here.
+            // Fix: Ignore AbortError which happens if pause() is called rapidly after play()
+            if (error.name === 'AbortError') {
+               // This is fine, it means we stopped locking before playback started
+            } else if (error.name === 'NotAllowedError') {
                 console.log("Video WakeLock pending user gesture.");
             } else {
                 console.warn("Video WakeLock error:", error.name, error.message);
@@ -187,7 +180,11 @@ export class DeviceService {
 
     // Stop Video
     if (this.noSleepVideo) {
-        this.noSleepVideo.pause();
+        // Safe pause
+        try {
+            this.noSleepVideo.pause();
+        } catch(e) {}
+        
         this.noSleepVideo.remove();
         this.noSleepVideo = null;
     }
