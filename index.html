@@ -9,14 +9,12 @@
     
     <title>BeamDrop</title>
     <meta name="theme-color" content="#000000" />
-    <!-- Fixed Deprecated Meta Tag -->
+    
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 
-    <!-- Favicons: SVG + PNG for better Google Indexing -->
-    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
-    <link rel="icon" type="image/png" href="/favicon.png" />
+    <!-- Simplified Favicons: Single source of truth to avoid confusion -->
+    <link rel="icon" href="/favicon.png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     
     <style>
@@ -68,12 +66,12 @@
   "imports": {
     "react/": "https://esm.sh/react@^19.2.3/",
     "react": "https://esm.sh/react@^19.2.3",
-    "vite": "https://esm.sh/vite@^7.3.0",
-    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
-    "lucide-react": "https://esm.sh/lucide-react@^0.562.0",
     "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
-    "jszip": "https://esm.sh/jszip@^3.10.1",
-    "vite-plugin-pwa": "https://esm.sh/vite-plugin-pwa@^1.2.0"
+    "lucide-react": "https://esm.sh/lucide-react@^0.562.0",
+    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
+    "vite": "https://esm.sh/vite@^7.3.0",
+    "vite-plugin-pwa": "https://esm.sh/vite-plugin-pwa@^1.2.0",
+    "jszip": "https://esm.sh/jszip@^3.10.1"
   }
 }
 </script>
@@ -81,7 +79,6 @@
   <body class="bg-black text-white h-[100dvh] antialiased selection:bg-white selection:text-black overflow-hidden">
     
     <!-- Semantic Content for SEO (Visually Hidden) -->
-    <!-- This ensures Google indexes the correct description instead of UI buttons -->
     <header style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">
       <h1>BeamDrop</h1>
       <p>Secure peer-to-peer file transfer with no servers and no limits.</p>

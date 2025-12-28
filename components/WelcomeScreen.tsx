@@ -1,53 +1,11 @@
 import React from 'react';
-import { Send, Download, Zap, Shield, Globe, Wrench } from 'lucide-react';
+import { Send, Download, Zap, Shield, Globe } from 'lucide-react';
 
 interface Props {
   onSelectRole: (role: 'sender' | 'receiver') => void;
 }
 
 export const WelcomeScreen: React.FC<Props> = ({ onSelectRole }) => {
-
-  // HELPER: Generates a 512x512 Transparent PNG with White Icon
-  const generateAssets = () => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 512;
-    canvas.height = 512;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // CLEARED: Background is now transparent (No fillRect)
-
-    // 2. Prepare SVG Image (Added explicit width/height for better browser rendering)
-    const img = new Image();
-    const svgData = `
-      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="white">
-        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-      </svg>
-    `;
-    const blob = new Blob([svgData], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
-
-    img.onload = () => {
-      ctx.clearRect(0, 0, 512, 512); // Ensure clean slate
-      
-      // 3. Draw Icon Centered
-      ctx.save();
-      ctx.translate(256, 256);
-      ctx.scale(15, 15); // Scale up 15x to fill 512px
-      ctx.translate(-12, -12); // Offset center
-      ctx.drawImage(img, 0, 0);
-      ctx.restore();
-
-      // 4. Download
-      const link = document.createElement('a');
-      link.download = 'beamdrop-icon.png';
-      link.href = canvas.toDataURL('image/png');
-      link.click();
-      
-      URL.revokeObjectURL(url);
-    };
-    img.src = url;
-  };
 
   return (
     <div className="flex flex-col items-center w-full max-w-md animate-in fade-in slide-in-from-bottom-8 duration-700">
@@ -100,15 +58,6 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole }) => {
           <span>P2P Direct</span>
         </div>
       </div>
-
-      {/* Temporary Developer Tool for PNG Generation */}
-      <button 
-        onClick={generateAssets}
-        className="text-[10px] text-neutral-700 flex items-center gap-1 hover:text-white transition-colors border border-white/5 px-2 py-1 rounded bg-white/5"
-      >
-        <Wrench className="w-3 h-3" />
-        Dev: Generate PNG Assets (Transparent)
-      </button>
 
     </div>
   );
