@@ -3,10 +3,20 @@ import { signalingService } from './signaling';
 import { ConnectionState, FileMetadata, TransferProgress, BatchMetadata } from '../types';
 import { deviceService } from './device';
 
-// Constants for Tuning Performance
-// Reduced to prevent 'OperationError: RTCDataChannel send queue is full' on mobile devices
-const CHUNK_SIZE = 16 * 1024; // 16KB chunks (Safe for all devices)
-const MAX_BUFFER_THRESHOLD = 64 * 1024; // 64KB Buffer Limit (Strict backpressure)
+// --- PERFORMANCE TUNING ---
+// 64KB is the "Golden Size" for WebRTC (SCTP) throughput.
+// Smaller makes CPU work too hard (overhead). Larger risks packet loss spikes.
+const CHUNK_SIZE = 64 * 1024; 
+
+// We want to keep the WebRTC buffer relatively full (to maximize bandwidth usage)
+// but strictly below the browser's crash limit.
+// 256KB Low / 1MB High provides a deep buffer for high-latency networks.
+const BUFFER_LOW_WATER_MARK = 256 * 1024; 
+const BUFFER_HIGH_WATER_MARK = 1024 * 1024; // 1MB Max Buffer
+
+// How many chunks to keep in JS memory ready to send immediately?
+// 5 chunks * 64KB = ~320KB RAM usage. Very safe.
+const LOOKAHEAD_QUEUE_SIZE = 5;
 
 // Expanded STUN server list
 const ICE_SERVERS = {
@@ -162,8 +172,8 @@ export class P2PManager {
     channel.onopen = () => {
       this.log("Data channel ready. You can now transfer files.");
       channel.binaryType = 'arraybuffer';
-      // Set a low threshold to trigger 'bufferedamountlow' events frequently
-      channel.bufferedAmountLowThreshold = 32 * 1024; // 32KB
+      // Use the Constant for low watermark
+      channel.bufferedAmountLowThreshold = BUFFER_LOW_WATER_MARK;
       
       if (this.peerConnection?.connectionState === 'connected') {
         this.updateState('connected');
@@ -181,7 +191,6 @@ export class P2PManager {
           const msg = JSON.parse(data);
           
           if (msg.type === 'batch-info') {
-             // Initialize Receiver Batch State
              this.batchState = {
                  active: true,
                  totalFiles: msg.batchMeta.totalFiles,
@@ -220,7 +229,6 @@ export class P2PManager {
         this.receivedBuffers.push(data);
         this.receivedSize += data.byteLength;
         
-        // Update Progress UI
         this.throttledReportProgress(this.receivedSize, this.currentFileMeta.size, this.currentFileMeta.name);
       }
     };
@@ -232,11 +240,9 @@ export class P2PManager {
         if (this.fileReceivedCallback) this.fileReceivedCallback(blob, meta);
         this.triggerReceivedNotification(meta.name);
         
-        // Update Batch State
         this.batchState.processedFiles++;
         this.batchState.processedBytes += meta.size;
 
-        // Force 100% progress for this file
         this.reportProgress(meta.size, meta.size, meta.name);
       } catch(e) {
           console.error("Failed to assemble file", e);
@@ -342,15 +348,11 @@ export class P2PManager {
     } catch (err) { console.error('Signal error', err); }
   }
 
-  /**
-   * Sends multiple files as a batch.
-   */
   public async sendFiles(files: File[]): Promise<void> {
       if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
           throw new Error("Connection not open");
       }
 
-      // 1. Calculate Batch Totals
       const totalSize = files.reduce((acc, file) => acc + file.size, 0);
       const totalFiles = files.length;
       
@@ -363,50 +365,21 @@ export class P2PManager {
           startTime: Date.now()
       };
 
-      // 2. Send Batch Metadata
       const batchMeta: BatchMetadata = { totalFiles, totalSize };
       this.dataChannel.send(JSON.stringify({ type: 'batch-info', batchMeta }));
 
-      // 3. Process Queue
       for (const file of files) {
           await this.sendFileInternal(file);
           this.batchState.processedFiles++;
           this.batchState.processedBytes += file.size;
       }
       
-      // Reset after batch
       this.batchState.active = false;
   }
 
-  private waitForDrain(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-        if (!this.dataChannel) return resolve();
-        if (this.dataChannel.bufferedAmount < MAX_BUFFER_THRESHOLD) return resolve();
-
-        const handler = () => {
-            cleanup();
-            resolve();
-        };
-        
-        const closeHandler = () => {
-             cleanup();
-             reject(new Error("Connection closed while waiting for drain"));
-        }
-
-        const cleanup = () => {
-            this.dataChannel?.removeEventListener('bufferedamountlow', handler);
-            this.dataChannel?.removeEventListener('close', closeHandler);
-            this.dataChannel?.removeEventListener('error', closeHandler);
-        }
-
-        this.dataChannel.addEventListener('bufferedamountlow', handler);
-        this.dataChannel.addEventListener('close', closeHandler);
-        this.dataChannel.addEventListener('error', closeHandler);
-    });
-  }
-
   /**
-   * Internal Send Function (Worker-Based Multiprocessing)
+   * HIGH-PERFORMANCE PIPELINED SEND
+   * Uses an in-memory queue to ensure the DataChannel is NEVER idle.
    */
   private async sendFileInternal(file: File): Promise<void> {
     const metadata: FileMetadata = {
@@ -419,65 +392,112 @@ export class P2PManager {
     this.lastProgressEmit = 0;
 
     const worker = new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
-    let currentOffset = 0;
     
+    let fileOffset = 0;
+    // The "Lookahead Queue" - chunks read from worker but not yet sent to peer
+    const chunkQueue: { buffer: ArrayBuffer, offset: number, eof: boolean }[] = [];
+    
+    // Status flags
+    let isWorkerReading = false;
+    let isFileDone = false;
+    let hasError = false;
+
     return new Promise<void>((resolve, reject) => {
-        worker.onmessage = async (e) => {
+        
+        // 1. Worker Message Handler
+        worker.onmessage = (e) => {
             if (e.data.type === 'error') {
+                hasError = true;
                 worker.terminate();
                 reject(e.data.error);
                 return;
             }
 
             if (e.data.type === 'chunk_ready') {
-                const { buffer, offset, eof } = e.data;
-                currentOffset = offset;
+                // Add to our lookahead queue
+                chunkQueue.push({ 
+                    buffer: e.data.buffer, 
+                    offset: e.data.offset, 
+                    eof: e.data.eof 
+                });
+                
+                isWorkerReading = false; // Worker is free now
 
-                try {
-                    // Robust Send Loop
-                    let chunkSent = false;
-                    while (!chunkSent) {
-                        // 1. Check Backpressure
-                        if (this.dataChannel && this.dataChannel.bufferedAmount > MAX_BUFFER_THRESHOLD) {
-                            await this.waitForDrain();
-                        }
+                // Try to push data to DataChannel immediately
+                pump();
 
-                        // 2. Try Sending
-                        try {
-                            if (this.dataChannel?.readyState === 'open') {
-                                this.dataChannel.send(buffer);
-                                chunkSent = true;
-                            } else {
-                                throw new Error("Connection lost");
-                            }
-                        } catch (err: any) {
-                            // 3. Handle specific "Queue Full" error if check wasn't enough
-                            if (err.name === 'OperationError' || (err.message && err.message.includes('full'))) {
-                                // Explicitly wait if the queue reports full, even if bufferedAmount seems okay
-                                console.warn("Backpressure: Queue full, pausing...");
-                                await this.waitForDrain();
-                            } else {
-                                throw err;
-                            }
-                        }
-                    }
-
-                    // Report using current offset relative to file
-                    this.throttledReportProgress(currentOffset, file.size, file.name);
-
-                    if (eof) {
-                        finish();
-                    } else {
-                        // Request next chunk
-                        worker.postMessage({ type: 'read_chunk', file, chunkSize: CHUNK_SIZE, startOffset: currentOffset });
-                    }
-                } catch (error) {
-                    worker.terminate();
-                    reject(error);
+                // If we aren't done, and the queue isn't full, ask for more
+                if (!e.data.eof) {
+                   fillQueue(); 
                 }
             }
         };
 
+        // 2. Queue Filler: Keeps the worker busy until our JS queue is full
+        const fillQueue = () => {
+            if (hasError || isFileDone) return;
+            // While we have room in RAM and worker is idle
+            if (chunkQueue.length < LOOKAHEAD_QUEUE_SIZE && !isWorkerReading && fileOffset < file.size) {
+                isWorkerReading = true;
+                worker.postMessage({ type: 'read_chunk', file, chunkSize: CHUNK_SIZE, startOffset: fileOffset });
+                fileOffset += CHUNK_SIZE;
+            }
+        };
+
+        // 3. The PUMP: Pushes data to WebRTC
+        const pump = async () => {
+             if (hasError || !this.dataChannel) return;
+
+             // While we have data in queue AND the channel isn't "full"
+             while (chunkQueue.length > 0 && (this.dataChannel.bufferedAmount < BUFFER_HIGH_WATER_MARK)) {
+                 const chunk = chunkQueue.shift();
+                 if (!chunk) break;
+
+                 try {
+                     this.dataChannel.send(chunk.buffer);
+                     
+                     // Update UI
+                     this.throttledReportProgress(chunk.offset, file.size, file.name);
+
+                     if (chunk.eof) {
+                         isFileDone = true;
+                         finish();
+                         return;
+                     }
+                 } catch (e: any) {
+                     // Safety net for "queue full" error if high watermark wasn't respected
+                     console.warn("Send failed, waiting for drain...", e);
+                     chunkQueue.unshift(chunk); // Put it back
+                     await waitForDrain(); 
+                     return; 
+                 }
+             }
+
+             // If we emptied the queue a bit, ask worker for more
+             fillQueue();
+
+             // If the channel is full, wait for it to drain
+             if (this.dataChannel.bufferedAmount >= BUFFER_HIGH_WATER_MARK) {
+                 await waitForDrain();
+                 pump(); // Resume pumping after drain
+             }
+        };
+
+        // 4. Backpressure Handler
+        const waitForDrain = (): Promise<void> => {
+            return new Promise(resolveDrain => {
+                if (!this.dataChannel) return resolveDrain();
+                if (this.dataChannel.bufferedAmount < BUFFER_LOW_WATER_MARK) return resolveDrain();
+
+                const handler = () => {
+                    this.dataChannel?.removeEventListener('bufferedamountlow', handler);
+                    resolveDrain();
+                };
+                this.dataChannel.addEventListener('bufferedamountlow', handler);
+            });
+        };
+
+        // 5. Completion Handler
         const finish = async () => {
             worker.terminate();
             try {
@@ -491,20 +511,19 @@ export class P2PManager {
             } catch (e) { reject(e); }
         };
 
-        worker.postMessage({ type: 'read_chunk', file, chunkSize: CHUNK_SIZE, startOffset: 0 });
+        // Start the engine
+        fillQueue();
     });
   }
   
-  // Public wrapper for single file (backward compatibility/safety)
   public async sendFile(file: File) {
       return this.sendFiles([file]);
   }
 
   private reportProgress(currentFileBytes: number, totalFileBytes: number, name: string) {
     if (this.progressCallback) {
-        // Calculate Global Batch Progress
         const totalBatchReceived = this.batchState.processedBytes + currentFileBytes;
-        const totalBatchSize = this.batchState.totalSize || totalFileBytes; // Fallback if single file
+        const totalBatchSize = this.batchState.totalSize || totalFileBytes;
         
         const elapsed = (Date.now() - this.batchState.startTime) / 1000;
         const speed = elapsed > 0 ? totalBatchReceived / elapsed : 0;
@@ -518,7 +537,6 @@ export class P2PManager {
             transferredBytes: currentFileBytes,
             fileSize: totalFileBytes,
             
-            // Batch Info
             totalFiles: this.batchState.totalFiles || 1,
             currentFileIndex: (this.batchState.processedFiles || 0) + 1,
             totalBatchBytes: totalBatchSize,
@@ -536,7 +554,6 @@ export class P2PManager {
     this.cleanupPeerConnection();
     this.connectionState = 'idle';
     deviceService.disableWakeLock();
-    // Reset batch
     this.batchState = { active: false, totalFiles: 0, totalSize: 0, processedFiles: 0, processedBytes: 0, startTime: 0 };
   }
 
