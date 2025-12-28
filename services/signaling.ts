@@ -1,9 +1,8 @@
 
 // ---------------------------------------------------------------------------
-// ⚡️ ADIM 2: CLOUDFLARE WORKER URL'İNİ BURAYA YAPIŞTIR
-// Sunucuyu 'npx wrangler deploy' ile yükledikten sonra verdiği wss:// linkini aşağıya gir.
+// ⚡️ ADIM 2: CLOUDFLARE WORKER URL
 // ---------------------------------------------------------------------------
-const CF_WORKER_URL = (import.meta as any).env?.VITE_SIGNALING_URL || 'wss://URL_YI_BURAYA_YAPISTIR';
+const CF_WORKER_URL = (import.meta as any).env?.VITE_SIGNALING_URL || 'wss://beamdrop-server.yasar-123-sevda.workers.dev';
 
 type SignalingCallback = (data: any) => void;
 type ConnectCallback = () => void;
@@ -27,13 +26,6 @@ export class SignalingService {
     this.roomId = roomId;
     this.onSignal = onSignal;
     this.onConnected = onConnected || null;
-
-    // Kullanıcı URL'yi değiştirmemişse uyarı ver
-    if (CF_WORKER_URL.includes('https://beamdrop-server.yasar-123-sevda.workers.dev')) {
-      console.error("❌ HATA: Lütfen services/signaling.ts dosyasındaki CF_WORKER_URL değişkenine Cloudflare Worker linkini yapıştırın.");
-      alert("Kurulum Tamamlanmadı: Lütfen services/signaling.ts dosyasına sunucu linkini ekleyin.");
-      return;
-    }
 
     console.log(`Connecting to CF Worker Signaling: ${CF_WORKER_URL}`);
 
@@ -92,17 +84,11 @@ export class SignalingService {
   }
 
   // Cloudflare WebSockets can timeout if idle, so we send a tiny ping occasionally
-  // technically CF handles pings, but app-level keepalive is safer
   private startKeepAlive() {
     this.stopKeepAlive();
     this.keepAliveInterval = setInterval(() => {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            // Empty object or specific ping type depending on worker logic.
-            // Our worker just broadcasts everything, so maybe don't send anything 
-            // visible to other peers unless we filter it. 
-            // For this simple implementation, standard TCP keepalive is usually enough,
-            // but if needed, we can send a dummy message.
-            // this.ws.send(JSON.stringify({ type: 'ping' }));
+            // Keep the connection alive
         }
     }, 30000);
   }
