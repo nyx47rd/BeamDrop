@@ -2,11 +2,12 @@
 import { FileMetadata, TransferProgress } from '../types';
 import { openDB, IDBPDatabase } from 'idb';
 import { deviceService } from './device';
+import { TransferMonitor } from './stats';
 
 const HEADER_SIZE = 4;
 const RAM_THRESHOLD = 150 * 1024 * 1024; // 150MB
 const IDB_BATCH_SIZE = 100;
-const SYNC_INTERVAL_MS = 250;
+const SYNC_INTERVAL_MS = 500; // Update UI and Sender every 500ms
 
 // --- STORAGE ENGINE ---
 class ChunkStore {
@@ -72,21 +73,16 @@ export class ReceiverManager {
     private chunkStore: ChunkStore | null = null;
     private currentMeta: FileMetadata | null = null;
     private pendingOrphanChunks: Map<number, ArrayBuffer> = new Map();
+    private monitor: TransferMonitor; // Dedicated Stats Engine
 
     // UI Callbacks
     private onProgress: (p: TransferProgress) => void;
     private onFileReceived: (blob: Blob, meta: FileMetadata) => void;
 
     // State
-    private stats = {
-        totalFiles: 0,
-        totalSize: 0,
-        transferredBytes: 0,
-        startTime: 0,
-        completedFiles: 0,
-        currentFileName: '',
-        currentFileBytes: 0
-    };
+    private completedFilesCount = 0;
+    private totalFilesCount = 0;
+    private currentFileName = '';
     private lastEmit = 0;
 
     constructor(
@@ -95,6 +91,7 @@ export class ReceiverManager {
     ) {
         this.onProgress = onProgress;
         this.onFileReceived = onFileReceived;
+        this.monitor = new TransferMonitor();
     }
 
     public setControlChannel(channel: RTCDataChannel) {
@@ -107,12 +104,12 @@ export class ReceiverManager {
             const view = new DataView(data);
             const index = view.getUint32(0, false);
             const chunk = data.slice(HEADER_SIZE);
+            const byteLength = chunk.byteLength;
 
             if (this.chunkStore) {
                 await this.chunkStore.add(index, chunk);
-                this.updateStats(chunk.byteLength);
+                this.handleBytesReceived(byteLength);
             } else {
-                // Orphan Buffer: Data arrived before 'file-start'
                 this.pendingOrphanChunks.set(index, chunk);
             }
             return;
@@ -121,19 +118,13 @@ export class ReceiverManager {
         // 2. Control Messages
         if (!isBinary) {
             if (data.type === 'batch-info') {
-                this.stats = { 
-                    ...this.stats, 
-                    totalFiles: data.meta.totalFiles, 
-                    totalSize: data.meta.totalSize, 
-                    transferredBytes: 0, 
-                    startTime: Date.now(), 
-                    completedFiles: 0 
-                };
+                this.totalFilesCount = data.meta.totalFiles;
+                this.completedFilesCount = 0;
+                this.monitor.reset(data.meta.totalSize);
             }
             else if (data.type === 'file-start') {
                 this.currentMeta = data.meta;
-                this.stats.currentFileName = data.meta.name;
-                this.stats.currentFileBytes = 0;
+                this.currentFileName = data.meta.name;
                 
                 this.chunkStore = new ChunkStore(data.meta.size, data.meta.type);
                 await this.chunkStore.init();
@@ -142,7 +133,7 @@ export class ReceiverManager {
                 if (this.pendingOrphanChunks.size > 0) {
                     for (const [idx, chunk] of this.pendingOrphanChunks) {
                         await this.chunkStore.add(idx, chunk);
-                        this.updateStats(chunk.byteLength);
+                        this.handleBytesReceived(chunk.byteLength);
                     }
                     this.pendingOrphanChunks.clear();
                 }
@@ -153,14 +144,16 @@ export class ReceiverManager {
                     const blob = await this.chunkStore.finish();
                     this.onFileReceived(blob, this.currentMeta);
                     
-                    this.stats.completedFiles++;
+                    this.completedFilesCount++;
+                    
+                    // Final Progress Emit for this file
                     this.emitProgress();
 
-                    // Handshake: Tell Sender we are done
+                    // Send ACK
                     this.controlChannel?.send(JSON.stringify({ type: 'ack-file' }));
                     
-                    if (this.stats.completedFiles === this.stats.totalFiles) {
-                         deviceService.sendNotification('Files Received', `All ${this.stats.totalFiles} files received.`);
+                    if (this.completedFilesCount === this.totalFilesCount) {
+                         deviceService.sendNotification('Files Received', `All ${this.totalFilesCount} files received.`);
                     }
 
                     this.chunkStore = null;
@@ -170,13 +163,9 @@ export class ReceiverManager {
         }
     }
 
-    private updateStats(bytes: number) {
-        this.stats.currentFileBytes += bytes;
-        this.stats.transferredBytes += bytes;
-        this.throttleProgress();
-    }
-
-    private throttleProgress() {
+    private handleBytesReceived(bytes: number) {
+        this.monitor.update(bytes);
+        
         const now = Date.now();
         if (now - this.lastEmit > SYNC_INTERVAL_MS) {
             this.emitProgress();
@@ -185,23 +174,36 @@ export class ReceiverManager {
     }
 
     private emitProgress() {
-        const elapsed = (Date.now() - this.stats.startTime) / 1000;
-        const speed = elapsed > 0 ? this.stats.transferredBytes / elapsed : 0;
-        const remaining = this.stats.totalSize - this.stats.transferredBytes;
-        const eta = speed > 0 ? Math.ceil(remaining / speed) : 0;
-
+        const metrics = this.monitor.getMetrics();
+        
+        // 1. Update Local UI
         this.onProgress({
-            fileName: this.stats.currentFileName,
-            transferredBytes: this.stats.currentFileBytes,
-            fileSize: 0,
-            totalFiles: this.stats.totalFiles,
-            currentFileIndex: this.stats.completedFiles + 1,
-            totalBatchBytes: this.stats.totalSize,
-            transferredBatchBytes: this.stats.transferredBytes,
-            speed: `${(speed / (1024*1024)).toFixed(1)} MB/s`,
-            eta: `${Math.floor(eta / 60)}m ${eta % 60}s`,
-            isComplete: this.stats.completedFiles === this.stats.totalFiles && this.stats.totalFiles > 0
+            fileName: this.currentFileName,
+            transferredBytes: 0, // Not used heavily in batch view
+            fileSize: 0, 
+            totalFiles: this.totalFilesCount,
+            currentFileIndex: this.completedFilesCount + 1,
+            totalBatchBytes: metrics.totalBytes,
+            transferredBatchBytes: metrics.transferredBytes,
+            speed: metrics.speedStr,
+            eta: metrics.etaStr,
+            isComplete: this.completedFilesCount === this.totalFilesCount && this.totalFilesCount > 0
         });
+
+        // 2. SYNC WITH SENDER (The key fix)
+        // We act as the Source of Truth for the sender
+        if (this.controlChannel?.readyState === 'open') {
+            this.controlChannel.send(JSON.stringify({
+                type: 'progress-sync',
+                progressReport: {
+                    transferredBytes: metrics.transferredBytes,
+                    speed: metrics.speed,
+                    eta: metrics.eta,
+                    totalFiles: this.totalFilesCount,
+                    completedFiles: this.completedFilesCount
+                }
+            }));
+        }
     }
 
     public cleanup() {

@@ -1,11 +1,11 @@
 
-import { FileMetadata, TransferProgress } from '../types';
+import { TransferProgress } from '../types';
 import { deviceService } from './device';
+import { TransferMonitor } from './stats'; // Used only for formatting helpers
 
 const CHUNK_SIZE = 64 * 1024; // 64KB
 const HEADER_SIZE = 4;
 const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024; // 16MB
-const SYNC_INTERVAL_MS = 200;
 
 const createWorker = () => new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
 
@@ -16,22 +16,17 @@ export class SenderManager {
     private queue: File[] = [];
     private isSending = false;
     
+    // Helper to format strings consistently with receiver
+    private monitorHelper = new TransferMonitor(); 
+
     // UI Callbacks
     private onProgress: (p: TransferProgress) => void;
     
     // State
-    private stats = {
-        totalFiles: 0,
-        totalSize: 0,
-        transferredBytes: 0,
-        startTime: 0,
-        completedFiles: 0,
-        currentFileName: '',
-        currentFileBytes: 0
-    };
+    private currentFileName = '';
+    private totalFiles = 0;
+    private totalSize = 0;
     
-    private lastEmit = 0;
-
     constructor(onProgress: (p: TransferProgress) => void) {
         this.onProgress = onProgress;
         this.worker = createWorker();
@@ -41,11 +36,34 @@ export class SenderManager {
         this.controlChannel = control;
         this.dataChannels = data;
         
-        // Listen for ACKs on control channel
+        // Listen for ACKs and SYNC from Receiver
         this.controlChannel.onmessage = (e) => {
             try {
                 const msg = JSON.parse(e.data);
-                // We can use this for specific file completion logic if needed
+                
+                // *** SYNCHRONIZATION LOGIC ***
+                // We update our UI based on what the Receiver tells us.
+                if (msg.type === 'progress-sync' && msg.progressReport) {
+                    const r = msg.progressReport;
+                    // We use the helper just to get the string formats based on raw values
+                    // We cheat a bit by injecting values into a temporary object or just duplicating format logic
+                    // But simpler: just create a temp view
+                    
+                    // We reconstruct the UI object from the Receiver's truth
+                    this.onProgress({
+                        fileName: this.currentFileName,
+                        transferredBytes: 0,
+                        fileSize: 0,
+                        totalFiles: r.totalFiles,
+                        currentFileIndex: r.completedFiles + 1,
+                        totalBatchBytes: this.totalSize,
+                        transferredBatchBytes: r.transferredBytes,
+                        speed: this.formatSpeed(r.speed),
+                        eta: this.formatETA(r.eta),
+                        isComplete: false // Handled by processQueue
+                    });
+                }
+
             } catch(err) {}
         };
     }
@@ -54,20 +72,11 @@ export class SenderManager {
         if (!this.controlChannel || this.controlChannel.readyState !== 'open') throw new Error("Connection lost");
 
         this.queue = [...files];
-        const totalSize = files.reduce((acc, f) => acc + f.size, 0);
-
-        this.stats = {
-            totalFiles: files.length,
-            totalSize,
-            transferredBytes: 0,
-            startTime: Date.now(),
-            completedFiles: 0,
-            currentFileName: '',
-            currentFileBytes: 0
-        };
-
+        this.totalSize = files.reduce((acc, f) => acc + f.size, 0);
+        this.totalFiles = files.length;
+        
         // 1. Send Batch Info to Receiver
-        this.sendControl({ type: 'batch-info', meta: { totalFiles: files.length, totalSize } });
+        this.sendControl({ type: 'batch-info', meta: { totalFiles: this.totalFiles, totalSize: this.totalSize } });
         
         this.processQueue();
     }
@@ -77,9 +86,21 @@ export class SenderManager {
         this.isSending = true;
 
         const file = this.queue.shift()!;
-        this.stats.currentFileName = file.name;
-        this.stats.currentFileBytes = 0;
-        this.emitProgress();
+        this.currentFileName = file.name;
+        
+        // Initial UI update for this file (waiting for sync)
+        this.onProgress({
+            fileName: this.currentFileName,
+            transferredBytes: 0,
+            fileSize: file.size,
+            totalFiles: this.totalFiles,
+            currentFileIndex: (this.totalFiles - this.queue.length), // rough calc
+            totalBatchBytes: this.totalSize,
+            transferredBatchBytes: 0, // Will jump when sync arrives
+            speed: 'Starting...',
+            eta: '...',
+            isComplete: false
+        });
 
         // 2. Send File Header
         this.sendControl({ type: 'file-start', meta: { name: file.name, size: file.size, type: file.type } });
@@ -93,14 +114,25 @@ export class SenderManager {
         // 5. Wait for ACK (Handshake to ensure receiver processed everything)
         await this.waitForAck();
 
-        this.stats.completedFiles++;
         this.isSending = false;
 
         if (this.queue.length > 0) {
             this.processQueue();
         } else {
             deviceService.sendNotification('Transfer Complete');
-            this.emitProgress(true);
+            // Final update to 100%
+             this.onProgress({
+                fileName: 'Complete',
+                transferredBytes: 0,
+                fileSize: 0,
+                totalFiles: this.totalFiles,
+                currentFileIndex: this.totalFiles,
+                totalBatchBytes: this.totalSize,
+                transferredBatchBytes: this.totalSize,
+                speed: 'Finished',
+                eta: '',
+                isComplete: true
+            });
         }
     }
 
@@ -129,12 +161,9 @@ export class SenderManager {
                         } else {
                             this.controlChannel?.send(packet); // Fallback
                         }
-
-                        // --- CRITICAL FIX: Update Stats LOCALLY immediately after sending ---
-                        this.stats.currentFileBytes += buffer.byteLength;
-                        this.stats.transferredBytes += buffer.byteLength;
-                        this.throttleProgress();
-                        // -------------------------------------------------------------------
+                        
+                        // NOTE: We REMOVED local stats updating here.
+                        // We strictly rely on Receiver's 'progress-sync' message now.
 
                     } catch (err) { console.error("Send failed", err); }
 
@@ -192,7 +221,7 @@ export class SenderManager {
             setTimeout(() => {
                 this.controlChannel?.removeEventListener('message', handler);
                 resolve();
-            }, 10000);
+            }, 60000); // 1 min timeout for large files
         });
     }
 
@@ -202,32 +231,22 @@ export class SenderManager {
         }
     }
 
-    private throttleProgress() {
-        const now = Date.now();
-        if (now - this.lastEmit > SYNC_INTERVAL_MS) {
-            this.emitProgress();
-            this.lastEmit = now;
-        }
+    // Formatting helpers duplicated to keep this file self-contained or we can import
+    private formatSpeed(bytesPerSec: number): string {
+        if (bytesPerSec === 0) return '0 MB/s';
+        const mb = bytesPerSec / (1024 * 1024);
+        if (mb >= 1) return `${mb.toFixed(1)} MB/s`;
+        const kb = bytesPerSec / 1024;
+        return `${kb.toFixed(0)} KB/s`;
     }
 
-    private emitProgress(forceComplete = false) {
-        const elapsed = (Date.now() - this.stats.startTime) / 1000;
-        const speed = elapsed > 0 ? this.stats.transferredBytes / elapsed : 0;
-        const remaining = this.stats.totalSize - this.stats.transferredBytes;
-        const eta = speed > 0 ? Math.ceil(remaining / speed) : 0;
-
-        this.onProgress({
-            fileName: this.stats.currentFileName,
-            transferredBytes: this.stats.currentFileBytes,
-            fileSize: 0,
-            totalFiles: this.stats.totalFiles,
-            currentFileIndex: this.stats.completedFiles + 1,
-            totalBatchBytes: this.stats.totalSize,
-            transferredBatchBytes: this.stats.transferredBytes,
-            speed: `${(speed / (1024*1024)).toFixed(1)} MB/s`,
-            eta: `${Math.floor(eta / 60)}m ${eta % 60}s`,
-            isComplete: forceComplete || (this.stats.completedFiles === this.stats.totalFiles && this.stats.totalFiles > 0)
-        });
+    private formatETA(seconds: number): string {
+        if (seconds === 0) return '';
+        if (!isFinite(seconds)) return 'Calculating...';
+        if (seconds < 60) return `${seconds}s left`;
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins}m ${secs}s left`;
     }
 
     public cleanup() {

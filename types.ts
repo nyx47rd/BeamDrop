@@ -10,10 +10,19 @@ export interface BatchMetadata {
   totalSize: number;
 }
 
+export interface ProgressReport {
+  transferredBytes: number;
+  speed: number; // bytes per second
+  eta: number; // seconds
+  totalFiles: number;
+  completedFiles: number;
+}
+
 export interface ChunkData {
-  type: 'batch-info' | 'file-start' | 'file-chunk' | 'file-end' | 'message';
+  type: 'batch-info' | 'file-start' | 'file-chunk' | 'file-end' | 'message' | 'progress-sync';
   metadata?: FileMetadata;
   batchMeta?: BatchMetadata;
+  progressReport?: ProgressReport;
   data?: string; // Base64 encoded for simplicity in JSON, or ArrayBuffer handling
   chunkIndex?: number;
 }
