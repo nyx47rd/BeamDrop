@@ -5,14 +5,9 @@ import './index.css';
 // @ts-ignore
 import { registerSW } from 'virtual:pwa-register';
 
-// Auto-update service worker with robust handling
-const updateSW = registerSW({
+// Register service worker without forcing reload
+registerSW({
   immediate: true,
-  onNeedRefresh() {
-    console.log("PWA update available, refreshing...");
-    // Force the update to apply immediately
-    updateSW(true);
-  },
   onOfflineReady() {
     console.log("PWA ready for offline use");
   },

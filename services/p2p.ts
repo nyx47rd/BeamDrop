@@ -1,4 +1,3 @@
-
 import { signalingService } from './signaling';
 import { ConnectionState, FileMetadata, TransferProgress } from '../types';
 import { deviceService } from './device';
@@ -91,12 +90,13 @@ export class P2PManager {
 
       this.peerConnection.onconnectionstatechange = () => {
           const state = this.peerConnection?.connectionState;
-          if (state === 'connected') {
-              this.updateState('connected');
-              deviceService.enableWakeLock();
-          } else if (state === 'disconnected' || state === 'failed') {
+          if (state === 'disconnected' || state === 'failed') {
               this.updateState('disconnected');
               deviceService.disableWakeLock();
+          } else if (state === 'connected') {
+              // We do NOT set 'connected' state here yet. 
+              // We must wait for DataChannels to be open.
+              this.checkReadiness();
           }
       };
       
@@ -108,6 +108,12 @@ export class P2PManager {
 
   private setupChannel(ch: RTCDataChannel) {
       ch.binaryType = 'arraybuffer';
+      
+      // Hook into onopen to ensure we are actually ready to send
+      ch.onopen = () => {
+          console.log(`P2P: Channel ${ch.label} open`);
+          this.checkReadiness();
+      };
       
       if (ch.label === 'control') {
           this.controlChannel = ch;
@@ -131,10 +137,20 @@ export class P2PManager {
               }
           };
       }
+  }
 
-      // Check if ready
-      if (this.controlChannel && this.transferChannel) {
-          console.log("P2P: All channels ready");
+  // Critical: Only say "Connected" when the plumbing is actually working
+  private checkReadiness() {
+      if (this.connectionState === 'connected') return;
+
+      const pcReady = this.peerConnection?.connectionState === 'connected';
+      const controlReady = this.controlChannel?.readyState === 'open';
+      const transferReady = this.transferChannel?.readyState === 'open';
+
+      if (pcReady && controlReady && transferReady) {
+          console.log("P2P: Fully Connected & Channels Ready");
+          this.updateState('connected');
+          deviceService.enableWakeLock();
       }
   }
 
@@ -143,7 +159,7 @@ export class P2PManager {
 
       try {
           if (data.type === 'join') {
-             if (this.connectionState === 'connected') return;
+             if (this.connectionState === 'connected' || this.connectionState === 'connecting') return;
              if (this.myId > data.senderId) {
                  // I am the Initiator
                  this.setupPeer();
