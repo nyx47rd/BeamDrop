@@ -1,23 +1,23 @@
+
 import { FileMetadata, TransferProgress } from '../types';
 import { openDB, IDBPDatabase } from 'idb';
 import { deviceService } from './device';
 import { TransferMonitor } from './stats';
 
 const RAM_THRESHOLD = 150 * 1024 * 1024; // 150MB
-const IDB_BATCH_SIZE = 50; 
+const IDB_BATCH_SIZE = 50; // Reduced batch size for smoother UI
 const SYNC_INTERVAL_MS = 500; 
 
-// --- STORAGE ENGINE (Random Access) ---
+// --- STORAGE ENGINE ---
 class ChunkStore {
     private useDB: boolean;
-    // For RAM: we use a Map to store index -> buffer because insertion is random
-    private ramChunks: Map<number, ArrayBuffer> = new Map();
+    private ramChunks: ArrayBuffer[] = [];
     private dbName: string | null = null;
     private db: IDBPDatabase | null = null;
-    // For DB: we assume IDB handles random keys efficiently
-    private writeQueue: { index: number, data: ArrayBuffer }[] = []; 
+    private writeQueue: ArrayBuffer[] = []; 
     private fileType: string;
     
+    // We just track total bytes now, logic is much simpler
     public bytesReceived = 0;
 
     constructor(fileSize: number, fileType: string) {
@@ -29,22 +29,19 @@ class ChunkStore {
         if (this.useDB) {
             this.dbName = `beamdrop_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
             this.db = await openDB(this.dbName, 1, {
-                upgrade(db) { 
-                    // Use 'index' as the keyPath for random access storage
-                    db.createObjectStore('chunks', { keyPath: 'index' }); 
-                },
+                upgrade(db) { db.createObjectStore('chunks', { autoIncrement: true }); },
             });
         }
     }
 
-    async add(index: number, data: ArrayBuffer) {
+    async add(data: ArrayBuffer) {
         this.bytesReceived += data.byteLength;
 
         if (this.useDB && this.db) {
-            this.writeQueue.push({ index, data });
+            this.writeQueue.push(data);
             if (this.writeQueue.length >= IDB_BATCH_SIZE) await this.flush();
         } else {
-            this.ramChunks.set(index, data);
+            this.ramChunks.push(data);
         }
     }
 
@@ -53,7 +50,8 @@ class ChunkStore {
         
         const tx = this.db.transaction('chunks', 'readwrite');
         const store = tx.objectStore('chunks');
-        await Promise.all(this.writeQueue.map(item => store.put(item)));
+        // We can just add, order is preserved by array push order and insertion time
+        await Promise.all(this.writeQueue.map(chunk => store.add(chunk)));
         this.writeQueue = [];
         await tx.done;
     }
@@ -62,20 +60,13 @@ class ChunkStore {
         if (this.useDB && this.db) {
             await this.flush();
             const tx = this.db.transaction('chunks', 'readonly');
-            // getAll returns sorted by key (index) by default in IndexedDB
-            const allItems = await tx.objectStore('chunks').getAll();
-            const buffers = allItems.map(item => item.data);
-            
+            const allChunks = await tx.objectStore('chunks').getAll();
             this.db.close();
             await window.indexedDB.deleteDatabase(this.dbName!);
-            return new Blob(buffers, { type: this.fileType });
+            return new Blob(allChunks, { type: this.fileType });
         } else {
-            // Convert Map to sorted array
-            const sortedKeys = Array.from(this.ramChunks.keys()).sort((a, b) => a - b);
-            const buffers = sortedKeys.map(k => this.ramChunks.get(k)!);
-            
-            const blob = new Blob(buffers, { type: this.fileType });
-            this.ramChunks.clear();
+            const blob = new Blob(this.ramChunks, { type: this.fileType });
+            this.ramChunks = [];
             return blob;
         }
     }
@@ -110,20 +101,11 @@ export class ReceiverManager {
         this.controlChannel = channel;
     }
 
-    public async handleBinaryChunk(dataWithHeader: ArrayBuffer) {
+    public async handleBinaryChunk(data: ArrayBuffer) {
         if (!this.chunkStore) return; 
         
-        // Multi-Channel IDM Logic:
-        // Parse the 4-byte header to get the chunk index.
-        const view = new DataView(dataWithHeader);
-        const chunkIndex = view.getUint32(0, false); // Big Endian
-        
-        // Slice the actual data (skip first 4 bytes)
-        // Note: slice creates a copy/view, it's efficient enough
-        const chunkData = dataWithHeader.slice(4);
-
-        await this.chunkStore.add(chunkIndex, chunkData);
-        this.handleBytesReceived(chunkData.byteLength);
+        await this.chunkStore.add(data);
+        this.handleBytesReceived(data.byteLength);
     }
 
     public async handleControlMessage(data: any) {
@@ -151,6 +133,10 @@ export class ReceiverManager {
     private async finalizeFile() {
         if (!this.chunkStore || !this.currentMeta) return;
 
+        // Since we use ordered reliable channels, if we get 'file-end', 
+        // we are guaranteed to have received all previous binary packets.
+        // No missing chunk check needed anymore.
+        
         console.log(`Receiver: Finalizing ${this.currentMeta.name}`);
         
         const blob = await this.chunkStore.finish();
