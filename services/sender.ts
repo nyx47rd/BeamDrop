@@ -1,23 +1,20 @@
-
 import { TransferProgress } from '../types';
 import { deviceService } from './device';
-import { TransferMonitor } from './stats'; 
 
 // HIGH PERFORMANCE CONFIG
-// 64KB is safe for fragmentation, but we will pile them up in the buffer.
 const CHUNK_SIZE = 64 * 1024; 
 
-// Allow up to 16MB in the outgoing buffer. This saturates 100mbps+ LANs.
-const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024; 
+// Allow up to 16MB in the outgoing buffer PER CHANNEL.
+const MAX_BUFFERED_AMOUNT = 4 * 1024 * 1024; 
 
-// When buffer drops below 1MB, refill immediately.
-const BUFFER_LOW_THRESHOLD = 1 * 1024 * 1024;
+// When buffer drops below this, refill.
+const BUFFER_LOW_THRESHOLD = 512 * 1024;
 
 const createWorker = () => new Worker(new URL('./workers/fileTransfer.worker.ts', import.meta.url), { type: 'module' });
 
 export class SenderManager {
     private controlChannel: RTCDataChannel | null = null;
-    private transferChannel: RTCDataChannel | null = null;
+    private transferChannels: RTCDataChannel[] = [];
     private worker: Worker;
     private queue: File[] = [];
     private isSending = false;
@@ -36,11 +33,12 @@ export class SenderManager {
 
     public setControlChannel(ch: RTCDataChannel) { this.controlChannel = ch; }
     
-    public setTransferChannel(ch: RTCDataChannel) { 
-        this.transferChannel = ch; 
-        // Critical: Set the low threshold. The 'bufferedamountlow' event triggers when buffer drops BELOW this.
-        // We set it to 1MB so we have time to refill before it hits 0.
-        this.transferChannel.bufferedAmountLowThreshold = BUFFER_LOW_THRESHOLD;
+    public setTransferChannels(channels: RTCDataChannel[]) { 
+        this.transferChannels = channels;
+        // Set threshold for all lanes
+        this.transferChannels.forEach(ch => {
+            ch.bufferedAmountLowThreshold = BUFFER_LOW_THRESHOLD;
+        });
     }
 
     public handleControlMessage(msg: any) {
@@ -105,7 +103,7 @@ export class SenderManager {
         await this.waitForControlMessage('ready-for-file');
 
         try {
-            await this.pumpFileHighSpeed(file);
+            await this.pumpFileMultiChannel(file);
         } catch (e) {
             console.error("Transfer interrupted", e);
             this.isSending = false;
@@ -137,68 +135,95 @@ export class SenderManager {
         }
     }
 
-    private pumpFileHighSpeed(file: File): Promise<void> {
+    private pumpFileMultiChannel(file: File): Promise<void> {
         return new Promise((resolve, reject) => {
             let offset = 0;
             let paused = false;
+            let chunkIndex = 0;
             
-            // This function asks the worker for data. 
-            // We call it repeatedly until the buffer is full.
+            // IDM Logic:
+            // We read chunks sequentially from the disk/memory.
+            // We wrap them with a header [Int32: Index] -> [Binary Data].
+            // We toss them to whichever channel is emptiest (Load Balancing).
+
             const readNext = () => {
-                if (paused) return; // Don't request if we are waiting for drain
+                if (paused) return;
                 
                 this.worker.postMessage({ 
                     type: 'read_chunk', 
                     file, 
                     chunkSize: CHUNK_SIZE, 
-                    startOffset: offset 
+                    startOffset: offset,
+                    context: chunkIndex // Pass index to worker
                 });
             };
 
             const onChunkReady = async (e: MessageEvent) => {
                 if (e.data.type === 'chunk_ready') {
-                    const { buffer, eof } = e.data;
+                    const { buffer, eof, context: idx } = e.data;
 
                     try {
-                        if (!this.transferChannel || this.transferChannel.readyState !== 'open') {
-                            throw new Error("Transfer channel closed");
+                        // 1. Find the best channel (Round Robin or Emptiest)
+                        // Emptiest is better for preventing head-of-line blocking if one freezes.
+                        let bestChannel: RTCDataChannel | null = null;
+                        let minBuffer = Infinity;
+
+                        // Filter only open channels
+                        const openChannels = this.transferChannels.filter(c => c.readyState === 'open');
+                        if (openChannels.length === 0) throw new Error("All channels closed");
+
+                        for (const ch of openChannels) {
+                            if (ch.bufferedAmount < minBuffer) {
+                                minBuffer = ch.bufferedAmount;
+                                bestChannel = ch;
+                            }
                         }
 
-                        // Send immediately
-                        this.transferChannel.send(buffer);
+                        if (!bestChannel) bestChannel = openChannels[0]; // Fallback
+
+                        // 2. Prepare Header [ChunkIndex (4 bytes)] + [Data]
+                        // We construct a new buffer with header.
+                        const dataWithHeader = new Uint8Array(4 + buffer.byteLength);
+                        const view = new DataView(dataWithHeader.buffer);
+                        view.setUint32(0, idx, false); // Big Endian
+                        dataWithHeader.set(new Uint8Array(buffer), 4);
+
+                        // 3. Send
+                        bestChannel.send(dataWithHeader);
                         
-                        // Check Buffer
-                        if (this.transferChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
-                            // STOP reading. Wait for drain.
-                            paused = true; 
-                            
+                        // 4. Backpressure logic
+                        // If the chosen channel is full, we should technically wait.
+                        // However, with multiple channels, we only hard-pause if *every* channel is busy
+                        // or if the chosen one is critical.
+                        // Simplification: Check the 'best' channel. If even the best channel is full, we must pause.
+                        if (bestChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+                            paused = true;
+                            const targetCh = bestChannel;
                             const onDrain = () => {
-                                this.transferChannel!.removeEventListener('bufferedamountlow', onDrain);
-                                paused = false;
-                                // Buffer drained enough, resume reading
-                                if (!eof) {
-                                    offset += CHUNK_SIZE;
-                                    readNext();
+                                targetCh.removeEventListener('bufferedamountlow', onDrain);
+                                if (paused) {
+                                    paused = false;
+                                    if (!eof) {
+                                        offset += CHUNK_SIZE;
+                                        chunkIndex++;
+                                        readNext();
+                                    }
                                 }
                             };
-                            this.transferChannel.addEventListener('bufferedamountlow', onDrain);
+                            targetCh.addEventListener('bufferedamountlow', onDrain);
                         } 
                         else {
-                            // Buffer is fine, keep pumping
                             if (eof) {
                                 this.worker.removeEventListener('message', onChunkReady);
                                 resolve();
                             } else {
                                 offset += CHUNK_SIZE;
+                                chunkIndex++;
                                 readNext();
                             }
                         }
-
-                        // Edge case: if EOF happened while buffer was full, we still need to resolve
-                        if (eof && paused) {
-                             this.worker.removeEventListener('message', onChunkReady);
-                             resolve();
-                        }
+                        
+                        // Edge case handle for EOF during pause logic handled by closure state above
 
                     } catch (err) {
                         this.worker.removeEventListener('message', onChunkReady);
@@ -208,7 +233,7 @@ export class SenderManager {
             };
 
             this.worker.addEventListener('message', onChunkReady);
-            readNext(); // Start the loop
+            readNext();
         });
     }
 

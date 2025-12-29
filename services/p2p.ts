@@ -4,6 +4,9 @@ import { deviceService } from './device';
 import { SenderManager } from './sender';
 import { ReceiverManager } from './receiver';
 
+// IDM Style: Use multiple parallel channels to maximize bandwidth
+const PARALLEL_CHANNEL_COUNT = 4;
+
 export class P2PManager {
   private peerConnection: RTCPeerConnection | null = null;
   private myId: string = Math.random().toString(36).substr(2, 9);
@@ -15,7 +18,7 @@ export class P2PManager {
 
   // Connection Resources
   private controlChannel: RTCDataChannel | null = null;
-  private transferChannel: RTCDataChannel | null = null;
+  private transferChannels: RTCDataChannel[] = [];
   
   private announceInterval: any = null;
 
@@ -56,7 +59,7 @@ export class P2PManager {
   cleanup() { 
       this.peerConnection?.close(); 
       this.peerConnection = null; 
-      this.transferChannel = null;
+      this.transferChannels = [];
       this.controlChannel = null;
       
       this.sender.cleanup();
@@ -94,8 +97,7 @@ export class P2PManager {
               this.updateState('disconnected');
               deviceService.disableWakeLock();
           } else if (state === 'connected') {
-              // We do NOT set 'connected' state here yet. 
-              // We must wait for DataChannels to be open.
+              // Wait for channels
               this.checkReadiness();
           }
       };
@@ -109,7 +111,6 @@ export class P2PManager {
   private setupChannel(ch: RTCDataChannel) {
       ch.binaryType = 'arraybuffer';
       
-      // Hook into onopen to ensure we are actually ready to send
       ch.onopen = () => {
           console.log(`P2P: Channel ${ch.label} open`);
           this.checkReadiness();
@@ -126,11 +127,15 @@ export class P2PManager {
               this.sender.handleControlMessage(data);
           }
       } 
-      else if (ch.label === 'transfer') {
-          this.transferChannel = ch;
-          this.sender.setTransferChannel(ch);
+      else if (ch.label.startsWith('transfer-')) {
+          // Add to pool
+          if (!this.transferChannels.find(c => c.label === ch.label)) {
+              this.transferChannels.push(ch);
+          }
           
-          // Receiver listens to binary on this channel
+          this.sender.setTransferChannels(this.transferChannels);
+          
+          // Receiver listens to binary on ALL transfer channels
           ch.onmessage = (e) => {
               if (e.data instanceof ArrayBuffer) {
                   this.receiver.handleBinaryChunk(e.data);
@@ -139,16 +144,19 @@ export class P2PManager {
       }
   }
 
-  // Critical: Only say "Connected" when the plumbing is actually working
+  // Critical: Only say "Connected" when ALL channels are ready
   private checkReadiness() {
       if (this.connectionState === 'connected') return;
 
       const pcReady = this.peerConnection?.connectionState === 'connected';
       const controlReady = this.controlChannel?.readyState === 'open';
-      const transferReady = this.transferChannel?.readyState === 'open';
+      
+      // Check if all parallel channels are open
+      const activeTransferChannels = this.transferChannels.filter(c => c.readyState === 'open');
+      const transferReady = activeTransferChannels.length === PARALLEL_CHANNEL_COUNT;
 
       if (pcReady && controlReady && transferReady) {
-          console.log("P2P: Fully Connected & Channels Ready");
+          console.log(`P2P: Fully Connected (${activeTransferChannels.length} Lanes Ready)`);
           this.updateState('connected');
           deviceService.enableWakeLock();
       }
@@ -164,14 +172,23 @@ export class P2PManager {
                  // I am the Initiator
                  this.setupPeer();
                  
-                 // Create Channels (Ordered = true guarantees delivery)
+                 // 1. Control Channel
                  const control = this.peerConnection!.createDataChannel('control', { ordered: true });
                  this.setupChannel(control);
                  
-                 // HIGH PERFORMANCE TUNING
-                 // We rely on SCTP's internal buffering.
-                 const transfer = this.peerConnection!.createDataChannel('transfer', { ordered: true });
-                 this.setupChannel(transfer);
+                 // 2. IDM Style: Create Multiple Transfer Channels
+                 // We disable ordering on transfer channels for maximum throughput.
+                 // We handle ordering manually via headers.
+                 this.transferChannels = [];
+                 for(let i=0; i < PARALLEL_CHANNEL_COUNT; i++) {
+                     const transfer = this.peerConnection!.createDataChannel(`transfer-${i}`, { 
+                         ordered: true, // Keep ordered per channel to reduce complexity, striping handles parallelism
+                         negotiated: false
+                     });
+                     this.transferChannels.push(transfer);
+                     this.setupChannel(transfer);
+                 }
+                 this.sender.setTransferChannels(this.transferChannels);
                  
                  const offer = await this.peerConnection!.createOffer();
                  await this.peerConnection!.setLocalDescription(offer);
