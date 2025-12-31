@@ -80,8 +80,38 @@ export class P2PManager {
   // --- INTERNAL NETWORKING ---
 
   private setupPeer() {
+      // CRITICAL: We need TURN servers for 4G/5G/Mobile Data connectivity.
+      // STUN is not enough for Symmetric NATs found in cellular networks.
+      // Using OpenRelay Project (free tier) for demonstration. 
+      // For production, consider deploying Coturn or using Twilio/Metered.ca.
       this.peerConnection = new RTCPeerConnection({
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+          iceServers: [
+            // Standard Google STUN servers (UDP) - Fast for WiFi/LAN
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+
+            // Free TURN Servers (OpenRelay Project) - Enables 4G/LTE support
+            {
+                urls: "turn:openrelay.metered.ca:80",
+                username: "openrelayproject",
+                credential: "openrelayproject",
+            },
+            {
+                urls: "turn:openrelay.metered.ca:443",
+                username: "openrelayproject",
+                credential: "openrelayproject",
+            },
+            {
+                urls: "turn:openrelay.metered.ca:443?transport=tcp",
+                username: "openrelayproject",
+                credential: "openrelayproject",
+            }
+          ],
+          iceCandidatePoolSize: 10,
+          bundlePolicy: 'max-bundle'
       });
 
       this.peerConnection.onicecandidate = e => {
