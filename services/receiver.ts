@@ -1,4 +1,3 @@
-
 import { FileMetadata, TransferProgress } from '../types';
 import { openDB, IDBPDatabase } from 'idb';
 import { deviceService } from './device';
@@ -87,6 +86,9 @@ export class ReceiverManager {
     private totalFilesCount = 0;
     private currentFileName = '';
     private lastEmit = 0;
+    
+    // Safety for race conditions
+    private pendingFinalize = false;
 
     constructor(
         onProgress: (p: TransferProgress) => void,
@@ -106,6 +108,15 @@ export class ReceiverManager {
         
         await this.chunkStore.add(data);
         this.handleBytesReceived(data.byteLength);
+        
+        // If we received the 'file-end' signal EARLIER but were missing bytes,
+        // check now if we have everything.
+        if (this.pendingFinalize && this.currentMeta) {
+            if (this.chunkStore.bytesReceived >= this.currentMeta.size) {
+                this.pendingFinalize = false;
+                await this.finalizeFile();
+            }
+        }
     }
 
     public async handleControlMessage(data: any) {
@@ -118,6 +129,7 @@ export class ReceiverManager {
         else if (data.type === 'file-start') {
             this.currentMeta = data.meta;
             this.currentFileName = data.meta.name;
+            this.pendingFinalize = false;
             
             this.chunkStore = new ChunkStore(data.meta.size, data.meta.type);
             await this.chunkStore.init();
@@ -126,17 +138,20 @@ export class ReceiverManager {
             this.sendControl({ type: 'ready-for-file' });
         }
         else if (data.type === 'file-end') {
-            this.finalizeFile();
+            if (this.chunkStore && this.currentMeta) {
+                if (this.chunkStore.bytesReceived >= this.currentMeta.size) {
+                    await this.finalizeFile();
+                } else {
+                    console.warn(`Receiver: file-end arrived but missing data. ${this.chunkStore.bytesReceived}/${this.currentMeta.size}. Waiting...`);
+                    this.pendingFinalize = true;
+                }
+            }
         }
     }
 
     private async finalizeFile() {
         if (!this.chunkStore || !this.currentMeta) return;
 
-        // Since we use ordered reliable channels, if we get 'file-end', 
-        // we are guaranteed to have received all previous binary packets.
-        // No missing chunk check needed anymore.
-        
         console.log(`Receiver: Finalizing ${this.currentMeta.name}`);
         
         const blob = await this.chunkStore.finish();
@@ -153,6 +168,7 @@ export class ReceiverManager {
 
         this.chunkStore = null;
         this.currentMeta = null;
+        this.pendingFinalize = false;
     }
 
     private handleBytesReceived(bytes: number) {

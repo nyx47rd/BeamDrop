@@ -1,4 +1,3 @@
-
 import { TransferProgress } from '../types';
 import { deviceService } from './device';
 import { TransferMonitor } from './stats'; 
@@ -106,6 +105,11 @@ export class SenderManager {
 
         try {
             await this.pumpFileHighSpeed(file);
+            
+            // CRITICAL FIX: Wait for the network buffer to drain completely
+            // before telling the receiver we are done.
+            await this.waitForDrain();
+            
         } catch (e) {
             console.error("Transfer interrupted", e);
             this.isSending = false;
@@ -209,6 +213,23 @@ export class SenderManager {
 
             this.worker.addEventListener('message', onChunkReady);
             readNext(); // Start the loop
+        });
+    }
+    
+    // Ensures all data has physically left the browser's buffer
+    private waitForDrain(): Promise<void> {
+        return new Promise(resolve => {
+            if (!this.transferChannel) return resolve();
+            if (this.transferChannel.bufferedAmount === 0) return resolve();
+            
+            console.log("Sender: Waiting for buffer drain...", this.transferChannel.bufferedAmount);
+            
+            const check = setInterval(() => {
+                if (!this.transferChannel || this.transferChannel.readyState !== 'open' || this.transferChannel.bufferedAmount === 0) {
+                    clearInterval(check);
+                    resolve();
+                }
+            }, 50);
         });
     }
 
