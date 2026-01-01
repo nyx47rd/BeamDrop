@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Send, Download, Zap, Smartphone, Monitor, Pencil, Check, User } from 'lucide-react';
+import { Send, Download, Zap, Smartphone, Monitor, Pencil, Check, User, AlertTriangle } from 'lucide-react';
 import { deviceService } from '../services/device';
 import { discoveryService, Peer } from '../services/discovery';
 
@@ -13,6 +13,7 @@ interface Props {
 export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], onConnectToPeer }) => {
   const [editingName, setEditingName] = useState(false);
   const [deviceName, setDeviceName] = useState('');
+  const [bannerStatus, setBannerStatus] = useState<'checking' | 'ok' | 'error'>('checking');
 
   useEffect(() => {
     setDeviceName(deviceService.getDeviceName());
@@ -66,7 +67,7 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
       </div>
 
       {/* LAN / Nearby Devices List */}
-      <div className="w-full flex-1 flex flex-col min-h-0 bg-[#1c1c1e] border border-white/5 rounded-[2rem] p-5 overflow-hidden">
+      <div className="w-full flex-1 flex flex-col min-h-0 bg-[#1c1c1e] border border-white/5 rounded-[2rem] p-5 overflow-hidden relative">
           <div className="flex items-center justify-between mb-4 shrink-0">
               <span className="text-xs font-bold uppercase tracking-wider text-neutral-500">Nearby Devices</span>
               <div className="flex items-center gap-1.5">
@@ -112,7 +113,7 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
              </button>
           </div>
           
-          <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+          <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar pb-6">
               {lanPeers.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-neutral-600 space-y-3 pt-4">
                       <div className="w-12 h-12 rounded-full border border-dashed border-neutral-700 flex items-center justify-center">
@@ -143,8 +144,28 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
                   ))
               )}
           </div>
-      </div>
 
+          {/* DEBUG: Hidden Image Loader to Verify File Existence */}
+          <div className="absolute bottom-2 left-0 w-full flex justify-center pointer-events-none opacity-50">
+            <div className="flex items-center gap-1.5 text-[10px] font-mono bg-black/80 px-2 py-1 rounded-full border border-white/10">
+                <span>Img Check:</span>
+                <span className={
+                    bannerStatus === 'checking' ? 'text-yellow-500' :
+                    bannerStatus === 'ok' ? 'text-green-500' : 'text-red-500 font-bold'
+                }>
+                    {bannerStatus === 'checking' ? '...' : bannerStatus === 'ok' ? 'OK' : 'MISSING (404)'}
+                </span>
+                {/* The actual loader */}
+                <img 
+                    src="/banner.png" 
+                    alt="" 
+                    className="w-0 h-0 opacity-0"
+                    onLoad={() => setBannerStatus('ok')}
+                    onError={() => setBannerStatus('error')}
+                />
+            </div>
+          </div>
+      </div>
     </div>
   );
 };

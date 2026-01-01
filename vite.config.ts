@@ -1,3 +1,4 @@
+
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -7,15 +8,27 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['icon.svg', 'favicon.png', 'apple-touch-icon.png', 'notification-icon.svg'],
+      // Added banner.png to be explicitly included
+      includeAssets: ['icon.svg', 'favicon.png', 'apple-touch-icon.png', 'notification-icon.svg', 'banner.png'],
       workbox: {
         cleanupOutdatedCaches: true,
         clientsClaim: true,
         skipWaiting: true,
         // Fix 404 on routes: Serve index.html for all navigation requests
         navigateFallback: '/index.html',
-        // Exclude API routes and static SEO files from being handled by the SPA fallback
-        navigateFallbackDenylist: [/^\/api\//, /sitemap\.xml$/, /robots\.txt$/], 
+        // CRITICAL FIX: Exclude images and static files from being handled by the SPA fallback
+        // This ensures /banner.png is treated as a file, not a route
+        navigateFallbackDenylist: [
+            /^\/api\//, 
+            /sitemap\.xml$/, 
+            /robots\.txt$/,
+            /.*\.png$/,
+            /.*\.jpg$/,
+            /.*\.jpeg$/,
+            /.*\.svg$/,
+            /.*\.ico$/,
+            /.*\.json$/
+        ], 
       },
       manifest: {
         name: 'BeamDrop P2P',
