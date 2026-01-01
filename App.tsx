@@ -11,8 +11,9 @@ import { XCircle, Loader2, User, Check, X } from 'lucide-react';
 const SenderLobby = React.lazy(() => import('./components/SenderLobby').then(module => ({ default: module.SenderLobby })));
 const ReceiverLobby = React.lazy(() => import('./components/ReceiverLobby').then(module => ({ default: module.ReceiverLobby })));
 const TransferPanel = React.lazy(() => import('./components/TransferPanel').then(module => ({ default: module.TransferPanel })));
+const ThumbnailGenerator = React.lazy(() => import('./components/ThumbnailGenerator').then(module => ({ default: module.ThumbnailGenerator })));
 
-type AppMode = 'welcome' | 'sender' | 'receiver' | 'transfer';
+type AppMode = 'welcome' | 'sender' | 'receiver' | 'transfer' | 'thumbnail';
 type Role = 'sender' | 'receiver' | null;
 
 const LoadingFallback = () => (
@@ -27,6 +28,7 @@ const App: React.FC = () => {
     const path = window.location.pathname;
     if (path === '/send') return 'sender';
     if (path === '/receive') return 'receiver';
+    if (path === '/thumbnail') return 'thumbnail';
     return 'welcome';
   };
 
@@ -132,6 +134,10 @@ const App: React.FC = () => {
       case 'transfer':
         title = `Transferring... - ${baseTitle}`;
         path = "/transfer";
+        break;
+      case 'thumbnail':
+        title = `Thumbnail Generator - ${baseTitle}`;
+        path = "/thumbnail";
         break;
       default:
         path = "/";
@@ -249,6 +255,14 @@ const App: React.FC = () => {
   };
 
   const isTransfer = appMode === 'transfer';
+
+  if (appMode === 'thumbnail') {
+      return (
+          <Suspense fallback={<LoadingFallback />}>
+            <ThumbnailGenerator />
+          </Suspense>
+      );
+  }
 
   return (
     <main className="h-[100dvh] w-full bg-black font-sans overflow-hidden">
