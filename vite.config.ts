@@ -4,19 +4,19 @@ import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
+  // Ensure Vite knows exactly where the public folder is
+  publicDir: 'public',
   plugins: [
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      // Added banner.png to be explicitly included
       includeAssets: ['icon.svg', 'favicon.png', 'apple-touch-icon.png', 'notification-icon.svg', 'banner.png'],
       workbox: {
         cleanupOutdatedCaches: true,
         clientsClaim: true,
         skipWaiting: true,
-        // Fix 404 on routes: Serve index.html for all navigation requests
         navigateFallback: '/index.html',
-        // CRITICAL FIX: Exclude images and static files from being handled by the SPA fallback
+        // IMPORTANT: Deny list ensures 404s are actual 404s for images, not index.html
         navigateFallbackDenylist: [
             /^\/api\//, 
             /sitemap\.xml$/, 
@@ -28,16 +28,17 @@ export default defineConfig({
             /.*\.ico$/,
             /.*\.json$/
         ],
-        // FORCE NETWORK FIRST FOR IMAGES
         runtimeCaching: [
           {
+            // NetworkOnly strategy for images ensures we always see the server reality
+            // This is crucial for debugging missing files
             urlPattern: ({ request }) => request.destination === 'image',
-            handler: 'NetworkFirst',
+            handler: 'NetworkOnly', 
             options: {
               cacheName: 'images',
               expiration: {
                 maxEntries: 10,
-                maxAgeSeconds: 60 * 60 * 24 * 7, // 1 week
+                maxAgeSeconds: 60 * 60 * 24, 
               },
             },
           },

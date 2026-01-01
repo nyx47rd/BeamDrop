@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Send, Download, Zap, Smartphone, Monitor, Pencil, Check, User, AlertTriangle } from 'lucide-react';
+import { Send, Download, Zap, Smartphone, Monitor, Pencil, Check, User, RefreshCw, Trash2 } from 'lucide-react';
 import { deviceService } from '../services/device';
 import { discoveryService, Peer } from '../services/discovery';
 
@@ -27,6 +27,20 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
       discoveryService.updateMyName();
       setEditingName(false);
     }
+  };
+
+  const hardReset = async () => {
+      if ('serviceWorker' in navigator) {
+          const registrations = await navigator.serviceWorker.getRegistrations();
+          for (const registration of registrations) {
+              await registration.unregister();
+          }
+      }
+      if ('caches' in window) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map(key => caches.delete(key)));
+      }
+      window.location.reload();
   };
 
   return (
@@ -147,8 +161,10 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
               )}
           </div>
 
-          {/* DEBUG: Hidden Image Loader to Verify File Existence */}
-          <div className="absolute bottom-2 left-0 w-full flex justify-center pointer-events-none opacity-50">
+          {/* DEBUG & FIX TOOLBAR */}
+          <div className="absolute bottom-2 left-0 w-full flex justify-center items-center gap-4 px-4 pointer-events-auto">
+            
+            {/* 1. Status Check */}
             <div className="flex items-center gap-1.5 text-[10px] font-mono bg-black/80 px-2 py-1 rounded-full border border-white/10">
                 <span>Img Check:</span>
                 <span className={
@@ -157,19 +173,25 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
                 }>
                     {bannerStatus === 'checking' ? '...' : bannerStatus === 'ok' ? 'OK' : 'MISSING (404)'}
                 </span>
-                {/* 
-                  CRITICAL FIX: 
-                  Added ?t=${cacheBuster} to bypass the Service Worker cache completely for this check.
-                  If this works, the file exists on the server.
-                */}
                 <img 
                     src={`/banner.png?t=${cacheBuster}`}
                     alt="" 
-                    className="w-0 h-0 opacity-0"
+                    className="w-0 h-0 opacity-0 absolute"
                     onLoad={() => setBannerStatus('ok')}
                     onError={() => setBannerStatus('error')}
                 />
             </div>
+
+            {/* 2. Hard Reset Button */}
+            {bannerStatus === 'error' && (
+                <button 
+                    onClick={hardReset}
+                    className="flex items-center gap-1.5 text-[10px] font-bold bg-red-500 text-white px-3 py-1 rounded-full animate-pulse shadow-lg hover:bg-red-600"
+                >
+                    <Trash2 className="w-3 h-3" />
+                    <span>FIX & RELOAD</span>
+                </button>
+            )}
           </div>
       </div>
     </div>
