@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Send, Download, Zap, Smartphone, Monitor, Pencil, Check, User, RefreshCw, Trash2 } from 'lucide-react';
+import { Send, Download, Zap, Smartphone, Monitor, Pencil, Check, User, Trash2 } from 'lucide-react';
 import { deviceService } from '../services/device';
 import { discoveryService, Peer } from '../services/discovery';
 
@@ -14,12 +14,32 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
   const [editingName, setEditingName] = useState(false);
   const [deviceName, setDeviceName] = useState('');
   const [bannerStatus, setBannerStatus] = useState<'checking' | 'ok' | 'error'>('checking');
-  // Use a timestamp to force the browser to ignore the Service Worker cache for the check
+  const [debugInfo, setDebugInfo] = useState<string>('');
   const [cacheBuster] = useState(Date.now());
 
   useEffect(() => {
     setDeviceName(deviceService.getDeviceName());
+    checkImage();
   }, []);
+
+  const checkImage = async () => {
+    try {
+        const response = await fetch(`/banner.png?t=${Date.now()}`);
+        const type = response.headers.get('content-type');
+        console.log('Banner Check:', { status: response.status, type });
+        
+        if (response.status === 200 && type?.includes('image')) {
+            setBannerStatus('ok');
+            setDebugInfo('OK');
+        } else {
+            setBannerStatus('error');
+            setDebugInfo(`${response.status} (${type?.split(';')[0] || 'unknown'})`);
+        }
+    } catch (e) {
+        setBannerStatus('error');
+        setDebugInfo('Fetch Fail');
+    }
+  };
 
   const handleSaveName = () => {
     if (deviceName.trim()) {
@@ -166,32 +186,23 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
             
             {/* 1. Status Check */}
             <div className="flex items-center gap-1.5 text-[10px] font-mono bg-black/80 px-2 py-1 rounded-full border border-white/10">
-                <span>Img Check:</span>
+                <span>Stats:</span>
                 <span className={
                     bannerStatus === 'checking' ? 'text-yellow-500' :
                     bannerStatus === 'ok' ? 'text-green-500' : 'text-red-500 font-bold'
                 }>
-                    {bannerStatus === 'checking' ? '...' : bannerStatus === 'ok' ? 'OK' : 'MISSING (404)'}
+                    {debugInfo || '...'}
                 </span>
-                <img 
-                    src={`/banner.png?t=${cacheBuster}`}
-                    alt="" 
-                    className="w-0 h-0 opacity-0 absolute"
-                    onLoad={() => setBannerStatus('ok')}
-                    onError={() => setBannerStatus('error')}
-                />
             </div>
 
             {/* 2. Hard Reset Button */}
-            {bannerStatus === 'error' && (
-                <button 
-                    onClick={hardReset}
-                    className="flex items-center gap-1.5 text-[10px] font-bold bg-red-500 text-white px-3 py-1 rounded-full animate-pulse shadow-lg hover:bg-red-600"
-                >
-                    <Trash2 className="w-3 h-3" />
-                    <span>FIX & RELOAD</span>
-                </button>
-            )}
+            <button 
+                onClick={hardReset}
+                className="flex items-center gap-1.5 text-[10px] font-bold bg-neutral-800 text-white px-3 py-1 rounded-full hover:bg-neutral-700 border border-white/10"
+            >
+                <Trash2 className="w-3 h-3" />
+                <span>Reset</span>
+            </button>
           </div>
       </div>
     </div>

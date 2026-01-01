@@ -2,7 +2,7 @@
 {
   "rewrites": [
     {
-      "source": "/(.*)",
+      "source": "/((?!.*\\.).*)",
       "destination": "/index.html"
     }
   ],
@@ -17,11 +17,11 @@
       ]
     },
     {
-      "source": "/(.*)\\.png",
+      "source": "/(.*)\\.(png|jpg|jpeg|gif|webp|svg)",
       "headers": [
         {
           "key": "Cache-Control",
-          "value": "no-store, no-cache, must-revalidate, proxy-revalidate"
+          "value": "public, max-age=0, must-revalidate"
         }
       ]
     }
