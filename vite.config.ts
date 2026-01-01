@@ -17,7 +17,6 @@ export default defineConfig({
         // Fix 404 on routes: Serve index.html for all navigation requests
         navigateFallback: '/index.html',
         // CRITICAL FIX: Exclude images and static files from being handled by the SPA fallback
-        // This ensures /banner.png is treated as a file, not a route
         navigateFallbackDenylist: [
             /^\/api\//, 
             /sitemap\.xml$/, 
@@ -28,7 +27,21 @@ export default defineConfig({
             /.*\.svg$/,
             /.*\.ico$/,
             /.*\.json$/
-        ], 
+        ],
+        // FORCE NETWORK FIRST FOR IMAGES
+        runtimeCaching: [
+          {
+            urlPattern: ({ request }) => request.destination === 'image',
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'images',
+              expiration: {
+                maxEntries: 10,
+                maxAgeSeconds: 60 * 60 * 24 * 7, // 1 week
+              },
+            },
+          },
+        ]
       },
       manifest: {
         name: 'BeamDrop P2P',

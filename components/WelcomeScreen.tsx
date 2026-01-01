@@ -14,6 +14,8 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
   const [editingName, setEditingName] = useState(false);
   const [deviceName, setDeviceName] = useState('');
   const [bannerStatus, setBannerStatus] = useState<'checking' | 'ok' | 'error'>('checking');
+  // Use a timestamp to force the browser to ignore the Service Worker cache for the check
+  const [cacheBuster] = useState(Date.now());
 
   useEffect(() => {
     setDeviceName(deviceService.getDeviceName());
@@ -155,9 +157,13 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
                 }>
                     {bannerStatus === 'checking' ? '...' : bannerStatus === 'ok' ? 'OK' : 'MISSING (404)'}
                 </span>
-                {/* The actual loader */}
+                {/* 
+                  CRITICAL FIX: 
+                  Added ?t=${cacheBuster} to bypass the Service Worker cache completely for this check.
+                  If this works, the file exists on the server.
+                */}
                 <img 
-                    src="/banner.png" 
+                    src={`/banner.png?t=${cacheBuster}`}
                     alt="" 
                     className="w-0 h-0 opacity-0"
                     onLoad={() => setBannerStatus('ok')}
