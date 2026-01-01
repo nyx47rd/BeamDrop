@@ -15,7 +15,7 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
   const [deviceName, setDeviceName] = useState('');
   const [bannerStatus, setBannerStatus] = useState<'checking' | 'ok' | 'error'>('checking');
   const [debugInfo, setDebugInfo] = useState<string>('');
-  const [cacheBuster] = useState(Date.now());
+  const [cacheBuster, setCacheBuster] = useState(Date.now());
 
   useEffect(() => {
     setDeviceName(deviceService.getDeviceName());
@@ -24,16 +24,22 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
 
   const checkImage = async () => {
     try {
-        const response = await fetch(`/banner.png?t=${Date.now()}`);
+        const ts = Date.now();
+        const response = await fetch(`/banner.png?check=${ts}`);
         const type = response.headers.get('content-type');
         console.log('Banner Check:', { status: response.status, type });
         
-        if (response.status === 200 && type?.includes('image')) {
-            setBannerStatus('ok');
-            setDebugInfo('OK');
+        if (response.status === 200) {
+            if (type?.includes('image')) {
+                setBannerStatus('ok');
+                setDebugInfo('OK');
+            } else {
+                setBannerStatus('error');
+                setDebugInfo('HTML Received');
+            }
         } else {
             setBannerStatus('error');
-            setDebugInfo(`${response.status} (${type?.split(';')[0] || 'unknown'})`);
+            setDebugInfo(`${response.status} Err`);
         }
     } catch (e) {
         setBannerStatus('error');
@@ -50,17 +56,20 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
   };
 
   const hardReset = async () => {
+      // 1. Unregister SW
       if ('serviceWorker' in navigator) {
           const registrations = await navigator.serviceWorker.getRegistrations();
           for (const registration of registrations) {
               await registration.unregister();
           }
       }
+      // 2. Clear Caches
       if ('caches' in window) {
           const keys = await caches.keys();
           await Promise.all(keys.map(key => caches.delete(key)));
       }
-      window.location.reload();
+      // 3. Force reload ignoring cache
+      window.location.href = window.location.origin + '?reset=' + Date.now();
   };
 
   return (
@@ -186,13 +195,17 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
             
             {/* 1. Status Check */}
             <div className="flex items-center gap-1.5 text-[10px] font-mono bg-black/80 px-2 py-1 rounded-full border border-white/10">
-                <span>Stats:</span>
+                <span>Img:</span>
                 <span className={
                     bannerStatus === 'checking' ? 'text-yellow-500' :
                     bannerStatus === 'ok' ? 'text-green-500' : 'text-red-500 font-bold'
                 }>
                     {debugInfo || '...'}
                 </span>
+                {/* Visual Proof */}
+                <div className="w-6 h-4 bg-neutral-800 border border-white/20 ml-1 overflow-hidden relative">
+                    <img src={`/banner.png?v=${cacheBuster}`} className="w-full h-full object-cover" alt="" />
+                </div>
             </div>
 
             {/* 2. Hard Reset Button */}
@@ -201,7 +214,7 @@ export const WelcomeScreen: React.FC<Props> = ({ onSelectRole, lanPeers = [], on
                 className="flex items-center gap-1.5 text-[10px] font-bold bg-neutral-800 text-white px-3 py-1 rounded-full hover:bg-neutral-700 border border-white/10"
             >
                 <Trash2 className="w-3 h-3" />
-                <span>Reset</span>
+                <span>Fix</span>
             </button>
           </div>
       </div>

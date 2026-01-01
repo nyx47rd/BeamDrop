@@ -10,7 +10,8 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['icon.svg', 'favicon.png', 'apple-touch-icon.png', 'notification-icon.svg', 'banner.png'],
+      // REMOVED 'banner.png' from here to force network fetch
+      includeAssets: ['icon.svg', 'favicon.png', 'apple-touch-icon.png', 'notification-icon.svg'],
       workbox: {
         cleanupOutdatedCaches: true,
         clientsClaim: true,

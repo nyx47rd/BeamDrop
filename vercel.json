@@ -2,7 +2,7 @@
 {
   "rewrites": [
     {
-      "source": "/((?!.*\\.).*)",
+      "source": "/((?!.*\\.(?:css|js|html|json|xml|txt|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)).*)",
       "destination": "/index.html"
     }
   ],
@@ -17,7 +17,7 @@
       ]
     },
     {
-      "source": "/(.*)\\.(png|jpg|jpeg|gif|webp|svg)",
+      "source": "/(.*)\\.(png|jpg|jpeg|gif|svg|ico)",
       "headers": [
         {
           "key": "Cache-Control",
@@ -26,5 +26,5 @@
       ]
     }
   ],
-  "cleanUrls": true
+  "cleanUrls": false
 }
